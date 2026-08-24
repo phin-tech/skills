@@ -1,9 +1,9 @@
 ---
-name: pi-agent
-description: Delegate a task to the Pi coding agent (the `pi` CLI) as a sub-agent, running in an isolated working directory. Use for second-opinion reviews, independent verification of work another agent did, or specialized git-tree rollbacks. Requires the `pi` binary on PATH.
+name: pi-handoff
+description: Hand off a task to the Pi coding agent (the `pi` CLI) as a sub-agent, running in an isolated working directory. Use for second-opinion reviews, independent verification of work another agent did, or specialized git-tree rollbacks. Requires the `pi` binary on PATH.
 ---
 
-# pi-agent
+# pi-handoff
 
 Runs [Pi](https://github.com/badlogic/pi-mono) — a separate coding agent with its
 own model, context and tools — as a sub-agent. Its value is *independence*: Pi

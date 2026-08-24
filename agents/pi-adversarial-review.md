@@ -1,5 +1,5 @@
 ---
-name: adversarial-reviewer
+name: pi-adversarial-review
 description: Hostile second-opinion review of a change, run through the independent Pi agent (`pi -p`) and then verified. Use when the user asks for an adversarial review, a red-team pass, or for "pi" to review something — especially before shipping work whose author (you) is the one who would be wrong about it.
 tools: Bash, Read, Grep, Glob
 model: opus

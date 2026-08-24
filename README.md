@@ -14,7 +14,7 @@ npx skills add phin-tech/skills
 Or a single skill:
 
 ```bash
-npx skills add phin-tech/skills --skill pi-review
+npx skills add phin-tech/skills --skill pi-cold-review
 ```
 
 Skills are also installable by hand — copy a folder from `skills/` into
@@ -29,14 +29,14 @@ stronger form of "second opinion" than persona role-play inside the same model.
 
 | Skill | What it does |
 |---|---|
-| [`pi-review`](skills/pi-review/SKILL.md) | Independent review of a git diff or a plan/design doc via `pi`, with model discovery and an optional multi-model panel, then verified before relaying. |
-| [`pi-agent`](skills/pi-agent/SKILL.md) | Delegate any task to Pi as a sub-agent in an isolated working directory — second opinions, independent verification, git-tree rollbacks. Covers the raw `pi` invocation mechanics the review skills build on. |
+| [`pi-cold-review`](skills/pi-cold-review/SKILL.md) | Independent review of a git diff or a plan/design doc via `pi`, with model discovery and an optional multi-model panel, then verified before relaying. |
+| [`pi-handoff`](skills/pi-handoff/SKILL.md) | Hand off any task to Pi as a sub-agent in an isolated working directory — second opinions, independent verification, git-tree rollbacks. Covers the raw `pi` invocation mechanics the review skills build on. |
 
 ## Agents
 
 | Agent | What it does |
 |---|---|
-| [`adversarial-reviewer`](agents/adversarial-reviewer.md) | A Claude Code sub-agent that briefs Pi for a hostile review of a change, then acts as the skeptic of Pi's output — verifying every finding before relaying it. Agent-format (not a skill); copy into `~/.claude/agents/`. |
+| [`pi-adversarial-review`](agents/pi-adversarial-review.md) | A Claude Code sub-agent that briefs Pi for a hostile review of a change, then acts as the skeptic of Pi's output — verifying every finding before relaying it. Agent-format (not a skill); copy into `~/.claude/agents/`. |
 
 ## Layout
 

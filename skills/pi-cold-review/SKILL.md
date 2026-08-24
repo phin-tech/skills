@@ -1,9 +1,9 @@
 ---
-name: pi-review
-description: Get an independent second-opinion review from the Pi coding agent (the `pi` CLI). Use for reviewing a git diff / change, or a plan / design doc — when you want a fresh, cold-context critic that has no stake in the work, then verify its findings before relaying them. Requires the `pi` binary on PATH.
+name: pi-cold-review
+description: Get an independent, cold-context second-opinion review from the Pi coding agent (the `pi` CLI). Use for reviewing a git diff / change, or a plan / design doc — when you want a fresh critic on a different model that has no stake in the work, then verify its findings before relaying them. Requires the `pi` binary on PATH.
 ---
 
-# pi-review
+# pi-cold-review
 
 Runs [Pi](https://github.com/badlogic/pi-mono) — a separate coding agent with its
 own model, context and tools — as a read-only reviewer. Its entire value is
@@ -13,7 +13,7 @@ the work, so it catches things the author (often you) is blind to.
 Two modes: **change review** (a git diff) and **plan review** (a markdown plan
 or design doc). Both follow the same shape — *brief Pi well → run it read-only →
 verify every finding before you relay it.* For raw `pi` invocation mechanics and
-flag details, see the `pi-agent` skill; this skill is about reviewing well.
+flag details, see the `pi-handoff` skill; this skill is about reviewing well.
 
 ## The non-negotiables
 
