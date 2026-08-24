@@ -27,10 +27,24 @@ stronger form of "second opinion" than persona role-play inside the same model.
 
 ## Skills
 
+### Pi — independent review via a different model
+
 | Skill | What it does |
 |---|---|
 | [`pi-cold-review`](skills/pi-cold-review/SKILL.md) | Independent review of a git diff or a plan/design doc via `pi`, with model discovery and an optional multi-model panel, then verified before relaying. |
 | [`pi-handoff`](skills/pi-handoff/SKILL.md) | Hand off any task to Pi as a sub-agent in an isolated working directory — second opinions, independent verification, git-tree rollbacks. Covers the raw `pi` invocation mechanics the review skills build on. |
+
+### Herdr — multi-agent orchestration
+
+Build on the `herdr` terminal multiplexer (`HERDR_ENV=1`) to run sub-agents in
+panes, tabs, and worktrees. Each picks a different coordination shape:
+
+| Skill | Shape | What it does |
+|---|---|---|
+| [`herdr-fanout`](skills/herdr-fanout/SKILL.md) | parallel | Fan independent slices out across sub-agents, one per tab, then collect and synthesize. |
+| [`herdr-pipeline`](skills/herdr-pipeline/SKILL.md) | sequential | Chain agents where each stage's output feeds the next — draft → critique → revise. |
+| [`herdr-worktree-agent`](skills/herdr-worktree-agent/SKILL.md) | isolated writes | Spawn an agent in its own git worktree so parallel writers never collide, then diff/merge back. |
+| [`herdr-relay`](skills/herdr-relay/SKILL.md) | back-and-forth | Mediate an ask/reply dialogue between two agents until they converge. |
 
 ## Agents
 
