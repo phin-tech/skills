@@ -57,12 +57,17 @@ ws=$(printf   '%s' "$out" | python3 -c 'import sys,json;print(json.load(sys.stdi
   from your tree.
 
 Then start the agent in that pane and give it the task — this agent *may* edit,
-so let it work with `--wait`:
+so let it work with `--wait`. **Address it by pane id**, not a custom name (a name
+set at `agent start` is cleared when the agent re-registers during init, so a
+later `agent prompt <name>` fails):
 
 ```bash
-herdr agent start "builder" --kind claude --pane "$pane"
-herdr agent prompt "builder" "<self-contained brief: what to build, the acceptance criteria, and to commit its work on this branch when done>" --wait --timeout 600000
+herdr agent start "$(basename "$pane")" --kind claude --pane "$pane"
+herdr agent prompt "$pane" "<self-contained brief: what to build, the acceptance criteria, and to commit its work on this branch when done>" --wait --timeout 600000
 ```
+
+Collect this agent's work from **git** (below), not from the terminal — that
+sidesteps the alternate-screen read limitation entirely.
 
 ## Brief for isolated write-work
 
@@ -72,7 +77,7 @@ A worktree agent starts cold and is about to change code, so be exact:
 - **That it is on its own branch in an isolated checkout**, and should **commit**
   its work there (so you can review real commits, not just a dirty tree).
 - **Scope fences** — which files/areas it may touch; not to run destructive
-  commands, push, or touch remotes unless you said so.
+  commands, push, touch remotes, or exit/quit the agent, unless you said so.
 - **What to report** — a summary of what changed and why, and any decisions it
   made, as its final message.
 
@@ -101,7 +106,7 @@ git merge --no-ff agent/feature-x          # or cherry-pick, or rebase, as you p
 
 Resolve conflicts yourself; the agent that wrote the branch is not the one
 merging it. If the work is wrong or partial, either send the agent a follow-up in
-its still-live pane (`herdr agent prompt "builder" "<fix/continue>"`) or abandon
+its still-live pane (`herdr agent prompt "$pane" "<fix/continue>"`) or abandon
 the branch — cheap, because it never touched your tree.
 
 ## Clean up

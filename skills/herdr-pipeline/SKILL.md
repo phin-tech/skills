@@ -36,7 +36,9 @@ jobs — that's `herdr-fanout`, not this. If two agents need to go back and fort
 stages; a chain of ten thin agents loses more to handoff overhead than it gains.
 
 Decide the stages up front: for each, a **role**, the **input** it receives, and
-the **output shape** it must produce (so the next stage can consume it).
+the **output shape** it must produce (so the next stage can consume it). Keep
+self-terminating instructions ("…and exit", "quit") out of every stage brief — an
+agent that exits closes its pane mid-pipeline.
 
 ## One pane per stage, run in order
 
@@ -45,27 +47,39 @@ want a per-stage roster in the tab bar. Panes keep the whole chain on one screen
 
 ```bash
 herdr pane split --current --direction right --cwd "$PWD" --no-focus
-# read .result.pane.pane_id  -> $pane
-herdr agent start "stage_draft" --kind claude --pane "$pane"
+# read .result.pane.pane_id  -> $pane1
+herdr agent start "$(basename "$pane1")" --kind claude --pane "$pane1"
 ```
+
+**Address each stage by its pane id**, not a custom name — a name set at
+`agent start` is cleared when the agent re-registers during init (Claude does
+this), breaking a later `agent prompt <name>`.
 
 Then run stages **sequentially**, each with `--wait` (a pipeline has nothing to
-do in parallel — blocking is correct here):
+do in parallel — blocking is correct here). **Hand payloads off through files,
+not the terminal:** Claude/Codex render on the alternate screen, so
+`agent read`/`pane read --source recent-unwrapped` returns blank and can't
+capture a stage's output. Have each stage write its result to a file and read
+the file yourself:
 
 ```bash
-# Stage 1 — produce
-herdr agent prompt "stage_draft" "<brief + the task input>" --wait --timeout 300000
-draft=$(herdr agent read "stage_draft" --source recent-unwrapped --lines 300)
+d=/tmp/pipeline.$$        # a scratch dir for handoffs
 
-# Stage 2 — consume stage 1, produce
-herdr agent prompt "stage_critique" "Here is the draft to critique:
-$draft
+# Stage 1 — produce, writing its output to a file
+herdr agent prompt "$pane1" "<brief + task input>. Write your full output to $d/draft.md and reply with only that path." --wait --timeout 300000
+draft=$(cat "$d/draft.md")     # you read the file, not the terminal
 
+# Stage 2 — consume stage 1's file, produce its own
+herdr agent prompt "$pane2" "Critique the draft in $d/draft.md. Write your critique to $d/critique.md and reply with only that path.
 <what to check, and the output shape>" --wait --timeout 300000
-critique=$(herdr agent read "stage_critique" --source recent-unwrapped --lines 300)
 
-# Stage 3 — consume stage 2 …
+# Stage 3 — consume $d/critique.md …
 ```
+
+If a stage shares the cwd, passing the **path** is enough; otherwise pass the
+file's contents. As a quick fallback for a short, one-screen result, `herdr pane
+read "$paneN" --source visible` shows the current screen — but files are the
+reliable default for handoffs.
 
 ## Carrying the payload cleanly
 

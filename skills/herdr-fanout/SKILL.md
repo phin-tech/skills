@@ -67,24 +67,29 @@ pane=$(printf '%s' "$out" | python3 -c 'import sys,json;print(json.load(sys.stdi
   parallel and could collide, give each its own git worktree instead — that's
   the `herdr-worktree-agent` skill; read-only reviewers can safely share.
 
-Then start a named agent in that pane and **fire the brief without `--wait`**, so
-you can launch the next slice while this one works:
+Then start an agent in that pane and **fire the brief without `--wait`**, so you
+can launch the next slice while this one works. **Address the agent by its pane
+id**, not a custom name:
 
 ```bash
-herdr agent start "reviewer_auth" --kind claude --pane "$pane"   # returns when ready
-herdr agent prompt "reviewer_auth" "<the self-contained brief for this slice>"
+herdr agent start "$(basename "$pane")" --kind claude --pane "$pane"   # returns when ready
+herdr agent prompt "$pane" "<the self-contained brief for this slice>"
 ```
 
-- `agent start` returns only once Herdr detects the agent ready for input;
-  agent **names** must match `[a-z][a-z0-9_-]{0,31}` and be unique among live
-  agents — use them as your stable target from here on.
-- Omitting `--wait` on `agent prompt` submits the task and returns; you collect
-  later. Use the `--kind` matching the requested agent (`claude`, `codex`, `pi`,
-  `gemini`, `opencode`, …; run `herdr agent` for the list). For genuine
-  independence on a review, pick a *different* kind/model per tab.
+- **Target by pane id.** A name set at `agent start` is cleared when the agent
+  re-registers during init (Claude does this), so a later `agent prompt <name>`
+  fails with `agent_not_found`. The pane id is the stable handle; the name arg is
+  required but you don't rely on it.
+- `agent start` returns once Herdr detects the agent ready for input. Omitting
+  `--wait` on `agent prompt` submits the task and returns; you collect later. Use
+  the `--kind` matching the requested agent (`claude`, `codex`, `pi`, `gemini`,
+  `opencode`, …; run `herdr agent` for the list). For genuine independence on a
+  review, pick a *different* kind/model per tab.
+- **Don't put a self-terminating instruction in a brief** ("…and exit", "quit") —
+  the agent quits and its tab vanishes before you can read it.
 
-Keep a table as you go — `{label, tab_id, pane_id, agent_name}` — parsed from
-each response, never guessed.
+Keep a table as you go — `{label, tab_id, pane_id}` — parsed from each response,
+never guessed.
 
 ## Dispatch briefs that survive cold context
 
@@ -98,25 +103,27 @@ read back.
 
 ## Wait, collect, synthesize
 
-After firing every brief, loop over your roster and wait each agent to a settled
-state, then read its transcript by agent name:
+After firing every brief, loop over your roster (by pane id) and wait each agent
+to a settled state, then read its result:
 
 ```bash
-herdr agent wait "reviewer_auth" --timeout 300000
-herdr agent read "reviewer_auth" --source recent-unwrapped --lines 200
+herdr agent wait "$pane" --timeout 300000
+herdr pane read "$pane" --source visible --lines 60      # see the read note below
 ```
 
 - `agent wait` with no `--until` settles on `idle`/`done`/`blocked` — the same
   states `agent prompt --wait` uses. Loop over the whole roster; the waits are
   independent, so the total wall-clock is the slowest agent, not the sum.
-- A `blocked` agent is asking for input — inspect with `herdr agent get` /
-  `agent read`, then either answer it (`herdr agent prompt "<name>" "<answer>"`)
-  or note it and move on.
+- **Reading TUI agents:** Claude/Codex render on the terminal's *alternate
+  screen*, so `--source recent-unwrapped` (scrollback) comes back **blank**. Use
+  `--source visible` for the current screen. For a summary longer than one
+  screen, don't scrape — tell each agent (in its brief) to write its full result
+  to a temp Markdown file and reply with the path, then read the files. For a
+  structured collect this file approach is the more reliable default.
+- A `blocked` agent is asking for input or hit a permission prompt — inspect with
+  `herdr agent get "$pane"` / `herdr pane read "$pane" --source visible`, then
+  answer it (`herdr agent prompt "$pane" "<answer>"`) or note it and move on.
 - A timeout is not a failure by itself — read the agent and decide.
-- If a completed response is longer than the pane's scrollback can show (common
-  when the agent renders on the alternate screen), ask that agent to write its
-  full summary to a temp Markdown file and reply with the path, then read the
-  file — the base skill's fallback.
 - Then **synthesize yourself**: merge and de-duplicate across sub-agents,
   reconcile disagreements by going to the source rather than averaging, and
   treat every sub-agent claim as a claim to verify before you relay it. A result

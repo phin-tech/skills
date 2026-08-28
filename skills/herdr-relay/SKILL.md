@@ -47,22 +47,26 @@ Two adjacent panes so both conversations are visible at once:
 
 ```bash
 herdr pane split --current --direction right --cwd "$PWD" --no-focus
-# .result.pane.pane_id -> $pane_a
-herdr agent start "impl" --kind claude --pane "$pane_a"
+# .result.pane.pane_id -> $impl
+herdr agent start "$(basename "$impl")" --kind claude --pane "$impl"
 
-herdr pane split --pane "$pane_a" --direction down --cwd "$PWD" --no-focus
-# .result.pane.pane_id -> $pane_b
-herdr agent start "expert" --kind codex --pane "$pane_b"
+herdr pane split --pane "$impl" --direction down --cwd "$PWD" --no-focus
+# .result.pane.pane_id -> $expert
+herdr agent start "$(basename "$expert")" --kind codex --pane "$expert"
 ```
 
 Give the two agents **different kinds/models** when independence is the point
-(e.g. an implementer consulting a different model as the expert). Name them for
-their roles — the names are your relay addresses.
+(e.g. an implementer consulting a different model as the expert). **Address each
+by its pane id** (`$impl`, `$expert`) for the whole relay — a name set at
+`agent start` is cleared when the agent re-registers during init, so
+`agent prompt <name>` would fail. The pane ids are your relay addresses.
 
 Brief each on its role and, crucially, on **how to signal you**: tell the asking
 agent to end a turn with an explicit, self-contained question when it needs the
 other; tell the answering agent to reply with just the answer. A clear turn
-boundary is what lets you relay cleanly.
+boundary is what lets you relay cleanly. Never relay a self-terminating
+instruction ("…and exit", "quit") to either agent — it closes that pane and
+breaks the dialogue.
 
 ## The relay loop
 
@@ -70,28 +74,33 @@ Kick off the initiator, then wait for it to reach a turn boundary — either it
 settles (`idle`/`done`) or it `blocked` on a question:
 
 ```bash
-herdr agent prompt "impl" "<the task, and: when you need domain input, end your message with a clearly marked question>" --wait --timeout 300000
+herdr agent prompt "$impl" "<the task, and: when you need domain input, end your message with a clearly marked question>" --wait --timeout 300000
 ```
 
-Then loop:
+**Reading a turn:** Claude/Codex render on the alternate screen, so scrollback
+(`--source recent-unwrapped`) is blank — read the current turn with
+`--source visible`, which shows the agent's latest reply. Then loop:
 
-1. **Read the current speaker.** `herdr agent read "impl" --source recent-unwrapped --lines 200`. Extract the question or the result.
+1. **Read the current speaker.** `herdr pane read "$impl" --source visible --lines 60`. Extract the question or the result.
 2. **Decide: converged or continue?** If the speaker produced the final answer
    (no open question), exit the loop. Otherwise take its question.
 3. **Relay to the other agent** and wait for its reply:
    ```bash
-   herdr agent prompt "expert" "impl asks: <question>. Answer concisely." --wait --timeout 300000
-   answer=$(herdr agent read "expert" --source recent-unwrapped --lines 200)
+   herdr agent prompt "$expert" "impl asks: <question>. Answer concisely." --wait --timeout 300000
+   answer=$(herdr pane read "$expert" --source visible --lines 60)
    ```
 4. **Relay the answer back** and let the first agent continue:
    ```bash
-   herdr agent prompt "impl" "expert answered: <answer>. Continue." --wait --timeout 300000
+   herdr agent prompt "$impl" "expert answered: <answer>. Continue." --wait --timeout 300000
    ```
 5. **Repeat** from step 1.
 
-If an agent goes `blocked` instead of settling, that's a mid-turn question or an
-approval prompt — `agent get` / `agent read` to see what it wants, then relay it
-or answer it (`herdr agent prompt "<name>" "<answer>"`) as appropriate.
+If a reply is longer than one screen, have that agent write the turn to a temp
+file and reply with the path, then read the file instead of the screen. If an
+agent goes `blocked` instead of settling, that's a mid-turn question or an
+approval prompt — `agent get "$pane"` / `pane read "$pane" --source visible` to
+see what it wants, then relay it or answer it
+(`herdr agent prompt "$pane" "<answer>"`) as appropriate.
 
 ## Keep the relay honest and terminating
 
