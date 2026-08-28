@@ -47,15 +47,25 @@ pane=$(printf '%s' "$tabout" | python3 -c 'import sys,json;print(json.load(sys.s
   in the tab bar.
 - **`--cwd "$PWD"`** so the agent shares the current working directory.
 
-Pick a unique agent name from the label, sanitized to `[a-z][a-z0-9_-]{0,31}`
-(lowercase, non-matching chars → `-`, leading digit prefixed). If
-`herdr agent list` already has that name, append a numeric suffix. Then start the
-agent and dispatch the prompt:
+Start the agent in that pane, then **address it by its pane id** for everything
+after:
 
 ```bash
-herdr agent start "<agent-name>" --kind claude --pane "$pane"   # returns when ready
-herdr agent prompt "<agent-name>" "<the prompt>"
+herdr agent start "$(basename "$pane")" --kind claude --pane "$pane"   # returns when ready
+herdr agent get "$pane"                                                 # confirm agent_status is idle
+herdr agent prompt "$pane" "<the prompt>"
 ```
+
+**Target by pane id, not a custom name.** Some agents (Claude among them)
+re-register as they finish initializing, which *clears* a name set at
+`agent start` — a later `agent prompt <name>` then fails with `agent_not_found`.
+The pane id is the stable handle. (The name passed to `agent start` is required
+but you don't rely on it afterward.)
+
+**Never put a self-terminating instruction in the prompt** — "…and exit",
+"quit", "/exit". A one-shot agent that exits closes its own pane and the tab
+vanishes before you can read anything. If the user's prompt contains one, strip
+it and mention you did.
 
 ## Default behavior: fire, don't block
 
@@ -66,14 +76,25 @@ background so the user's current session stays free. Then report:
   address it later;
 - that it's running in the background.
 
-Offer to collect the result when it's done. Only **wait** (`herdr agent prompt
-… --wait --timeout <ms>`, then `herdr agent read "<agent-name>" --source
-recent-unwrapped`) if the user clearly wants the answer brought back inline
-("...and tell me what it finds") rather than just launched.
+Offer to collect the result when it's done. Only **wait** if the user clearly
+wants the answer brought back inline ("...and tell me what it finds"):
 
-If `agent start` or the dispatch fails (e.g. `agent_prompt_stalled`), inspect
-`herdr agent get` / `herdr agent read` on the pane and report what happened —
-don't silently leave a dead tab.
+```bash
+herdr agent prompt "$pane" "<the prompt>" --wait --timeout 120000
+herdr pane read "$pane" --source visible --lines 45      # see below
+```
+
+**Reading a TUI agent's answer.** Claude, Codex, and similar render on the
+terminal's *alternate screen*, so `--source recent-unwrapped` (scrollback)
+comes back **blank** — those rows never enter host scrollback. Use
+`--source visible` to see the current screen, which includes the agent's latest
+reply. For output longer than one screen, don't scrape at all: tell the agent to
+write its full result to a temp file and reply with the path, then read the file.
+
+If `agent start` or the dispatch fails (e.g. `agent_prompt_stalled`), or the
+agent goes `blocked` (it hit a permission/approval prompt), inspect
+`herdr agent get "$pane"` and `herdr pane read "$pane" --source visible` and
+report what happened — don't silently leave a dead or stuck tab.
 
 ## Notes
 
