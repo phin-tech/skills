@@ -41,6 +41,7 @@ panes, tabs, and worktrees. Each picks a different coordination shape:
 
 | Skill | Shape | What it does |
 |---|---|---|
+| [`herdr-tab`](skills/herdr-tab/SKILL.md) | one-shot | `/herdr-tab [name] <prompt>` — start one agent in a new tab and hand it the prompt. |
 | [`herdr-fanout`](skills/herdr-fanout/SKILL.md) | parallel | Fan independent slices out across sub-agents, one per tab, then collect and synthesize. |
 | [`herdr-pipeline`](skills/herdr-pipeline/SKILL.md) | sequential | Chain agents where each stage's output feeds the next — draft → critique → revise. |
 | [`herdr-worktree-agent`](skills/herdr-worktree-agent/SKILL.md) | isolated writes | Spawn an agent in its own git worktree so parallel writers never collide, then diff/merge back. |
