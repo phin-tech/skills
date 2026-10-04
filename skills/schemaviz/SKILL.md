@@ -18,6 +18,12 @@ Use whatever is cheapest and most accurate:
 - **A generator that already exists**, if the project has one: `prisma-dbml-generator` (Prisma), `drizzle-dbml-generator`
   (Drizzle), `npx @dbml/cli db2dbml postgres <url>` (a live database), `sql2dbml` (a `.sql` dump). Check its output
   against the code before trusting it.
+- **Prisma:** no database needed. In a scratch directory: `npm i prisma@6 prisma-dbml-generator` (tested with Prisma 6;
+  not tried with 7), copy `schema.prisma`, add `generator dbml { provider = "prisma-dbml-generator" }` to the **copy**,
+  delete its other generators (they need packages you don't have), set dummy values for any `env()` URLs, then
+  `npx prisma generate`. Expect noise: `/// @zod...` and `/// [Type]` doc comments become notes and should be dropped,
+  `Enum` blocks are ignored by the renderer (enum columns just show the enum name), and `@@map` names are only kept if
+  the generator emits them, so compare table names with the `@@map` values. Use `--expect $(grep -c '^model ' schema.prisma)`.
 - **SQLAlchemy:** `python schemaviz.py sqlalchemy app.models:Base --out schema.dbml` (needs sqlalchemy; run it where the
   app's dependencies are installed). Reads `comment=` as the descriptions and `info={"group": "..."}` on a table as its section.
 - **Django:** `python schemaviz.py django mysite.settings --out schema.dbml` (needs django; run it where the project's
