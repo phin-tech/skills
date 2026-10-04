@@ -97,6 +97,37 @@ no `ref` although a `thing` table exists, which may mean a missed foreign key (m
 Open the HTML in a browser. A JSON file works in place of DBML for anything easier to emit that way:
 `{"tables": [{"name": "users", "comment": "...", "group": "...", "cols": [{"n": "id", "t": "int", "pk": true}, {"n": "org_id", "fk": "orgs.id"}]}]}`.
 
+## 4. Track the schema and see what a migration changed
+
+Commit the DBML next to the code (for example `docs/schema.dbml`) and regenerate it whenever the models or migrations
+change. Then any two points in history can be compared without checking anything out or installing the app:
+
+```
+python schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD --out changes.html   # tag/commit/branch
+python schemaviz.py diff --file docs/schema.dbml --from HEAD --out changes.html            # HEAD vs working tree
+python schemaviz.py diff old.dbml new.dbml --old-label before --new-label after            # two plain files
+```
+
+The page is the normal four tabs with the changes marked in place: green `+` added, amber `~` changed (with a "was"
+line: type, nullability, key, unique, foreign key target), red struck-through `−` removed. A banner counts them and
+"Only show changed tables" hides the rest. A history that has no committed DBML yet can still be compared: generate the
+DBML at each commit (`git worktree add`, then step 1) and diff the two files.
+
+**Renames.** DBML has no memory, so a rename looks like one removal plus one addition. The diff prints
+`hint: possible rename: ...` on stderr when a removed and an added table share most columns, or a removed and an added
+column in one table have the same type. Do not accept a hint on its own. Confirm it in the history between the two
+revisions: the migrations (Django `RenameModel`/`RenameField`, Rails `rename_table`/`rename_column`, Alembic
+`op.rename_table`/`new_column_name`, SQL `ALTER TABLE ... RENAME`), or `git log -M --follow` and `git diff -M` on the model
+files. Pass only confirmed renames, then rerun:
+
+```
+python schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD \
+  --rename users=accounts --rename accounts.created_at=joined_at
+```
+
+`old=new` renames a table; `table.old=new` renames a column. Renamed items show as changed, with "renamed from" and any
+other change, and a foreign key that only follows a renamed table is not reported as changed.
+
 ## What the renderer decides for you
 
 - A table that most others point at (a tenant or account root) is drawn as a bar rather than as a hub with dozens of

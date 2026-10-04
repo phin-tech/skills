@@ -369,7 +369,7 @@ def order_groups(tables: list[dict], hub: str | None) -> list[dict]:
             for g in order]
 
 
-def to_html(tables: list[dict], title: str, source: str) -> str:
+def to_html(tables: list[dict], title: str, source: str, diff: dict | None = None) -> str:
     names = {t["name"] for t in tables}
     for t in tables:  # a ref to a table that isn't in the file can't be drawn
         for c in t["cols"]:
@@ -377,9 +377,174 @@ def to_html(tables: list[dict], title: str, source: str) -> str:
                 del c["fk"]
     hub = find_hub(tables)
     assign_groups(tables, hub)
-    data = json.dumps({"title": title, "source": source, "hub": hub, "groups": order_groups(tables, hub)}, ensure_ascii=False)
+    data = json.dumps({"title": title, "source": source, "hub": hub, "diff": diff, "groups": order_groups(tables, hub)}, ensure_ascii=False)
     html = (HERE / "template.html").read_text()
     return html.replace("/*TITLE*/", re.sub(r"[<>&]", "", title)).replace("/*DATA*/{}", data.replace("</", "<\\/"))
+
+
+def load_tables(path: Path) -> list[dict]:
+    text = path.read_text()
+    tables = parse_json(text) if path.suffix == ".json" else parse_dbml(text)
+    if not tables:
+        raise SystemExit(f"No tables found in {path}.")
+    return tables
+
+
+def load_from_git(rev: str, file: str) -> list[dict]:
+    """The tables in `file` as committed at `rev` (any tag, branch or commit), read with `git show`."""
+    import subprocess
+
+    r = subprocess.run(["git", "show", f"{rev}:./{file}"], capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit(f"git could not read {file} at {rev}: {r.stderr.strip()}")
+    tables = parse_json(r.stdout) if file.endswith(".json") else parse_dbml(r.stdout)
+    if not tables:
+        raise SystemExit(f"No tables found in {file} at {rev}.")
+    return tables
+
+
+def _short_rev(rev: str) -> str:
+    """Commit hashes are shortened to 7 characters; tags, branches and HEAD~2 are shown as typed."""
+    return rev[:7] if re.fullmatch(r"[0-9a-f]{12,40}", rev) else rev
+
+
+def _col_changes(o: dict, n: dict, trn: dict | None = None) -> list[str]:
+    """What differs between two versions of the same column, as short phrases."""
+    out = []
+    if o["t"] != n["t"]:
+        out.append(f"{o['t'] or '?'} -> {n['t'] or '?'}")
+    if o["null"] != n["null"]:
+        out.append("now nullable" if n["null"] else "now not null")
+    if o["pk"] != n["pk"]:
+        out.append("now primary key" if n["pk"] else "no longer primary key")
+    if o["uq"] != n["uq"]:
+        out.append("now unique" if n["uq"] else "no longer unique")
+    of, nf = o.get("fk"), n.get("fk")
+    if of and trn and of[0] in trn:
+        of = [trn[of[0]], *of[1:]]  # the table it points at was renamed: not a change to this column
+    if (of and of[:2]) != (nf and nf[:2]):
+        out.append("fk " + (f"{of[0]}.{of[1]}" if of else "none") + " -> " + (f"{nf[0]}.{nf[1]}" if nf else "none"))
+    if o.get("note") != n.get("note"):
+        out.append("note edited")
+    return out
+
+
+def parse_renames(specs: list[str]) -> tuple[dict, dict]:
+    """`old=new` renames a table; `table.old=new` renames a column (table is the new table name, or the old one)."""
+    tables, cols = {}, {}
+    for spec in specs or []:
+        left, eq, right = spec.partition("=")
+        if not eq or not left or not right:
+            raise SystemExit(f"--rename wants old=new or table.old=new, got {spec!r}")
+        if "." in left:
+            t, _, c = left.partition(".")
+            cols[(t, c)] = right
+        else:
+            tables[left] = right
+    return tables, cols
+
+
+def diff_tables(old: list[dict], new: list[dict], renames: list[str] | None = None) -> tuple[list[dict], dict]:
+    """Merge two schemas into one list. Every table and column gets a `diff` of added, removed or changed
+    (absent when unchanged), changed columns get `was`, renamed tables get `renamed_from`. Removed tables and
+    columns stay, so they can be shown. `renames` are confirmed renames (see parse_renames)."""
+    import copy
+
+    trn, crn = parse_renames(renames)
+    old_by, new_by = {t["name"]: t for t in old}, {t["name"]: t for t in new}
+    for a, b in trn.items():
+        if a not in old_by or b not in new_by:
+            raise SystemExit(f"--rename {a}={b}: needs {a} in the old schema and {b} in the new one.")
+    merged, stats = [], defaultdict(int)
+    matched_tables = set()
+    for t in copy.deepcopy(new):
+        old_name = next((a for a, b in trn.items() if b == t["name"]), t["name"])
+        o = old_by.get(old_name)
+        if o is None:
+            t["diff"] = "added"
+            stats["tables_added"] += 1
+            stats["cols_added"] += len(t["cols"])
+            for c in t["cols"]:
+                c["diff"] = "added"
+            merged.append(t)
+            continue
+        matched_tables.add(old_name)
+        ocols = {c["n"]: c for c in o["cols"]}
+        # column renames may be keyed by the new or the old table name
+        ren = {new_c: old_c for (tn, old_c), new_c in crn.items() if tn in (t["name"], old_name)}
+        seen_old, changed = set(), old_name != t["name"]
+        if changed:
+            t["renamed_from"] = old_name
+        for c in t["cols"]:
+            src = ren.get(c["n"], c["n"])
+            if src != c["n"] and src not in ocols:
+                raise SystemExit(f"--rename {t['name']}.{src}={c['n']}: no column {src} in old {o['name']}.")
+            oc = ocols.get(src)
+            if oc is None:
+                c["diff"] = "added"; stats["cols_added"] += 1; changed = True
+                continue
+            seen_old.add(src)
+            why = _col_changes(oc, c, trn)
+            if src != c["n"]:
+                why.insert(0, f"renamed from {src}")
+            if why:
+                c["diff"] = "changed"; c["was"] = "; ".join(why); stats["cols_changed"] += 1; changed = True
+        prev = None  # re-insert dropped columns after the column that used to precede them
+        kept = {ren.get(c["n"], c["n"]): c["n"] for c in t["cols"]}
+        for oc in o["cols"]:
+            if oc["n"] in kept:
+                prev = kept[oc["n"]]
+                continue
+            gone = dict(copy.deepcopy(oc), diff="removed")
+            at = 0 if prev is None else 1 + next(i for i, c in enumerate(t["cols"]) if c["n"] == prev)
+            t["cols"].insert(at, gone)
+            prev = oc["n"]
+            stats["cols_removed"] += 1; changed = True
+        if sorted(o["uniq"]) != sorted(t["uniq"]):
+            changed = True
+        if changed:
+            t["diff"] = "changed"
+            stats["tables_changed"] += 1
+        merged.append(t)
+    for o in copy.deepcopy(old):
+        if o["name"] not in matched_tables:
+            o["diff"] = "removed"
+            for c in o["cols"]:
+                c["diff"] = "removed"
+            stats["tables_removed"] += 1
+            stats["cols_removed"] += len(o["cols"])
+            merged.append(o)
+    keys = ["tables_added", "tables_removed", "tables_changed", "cols_added", "cols_removed", "cols_changed"]
+    return merged, {k: stats[k] for k in keys}
+
+
+def rename_hints(old: list[dict], new: list[dict], renames: list[str] | None = None) -> list[str]:
+    """Guesses at renames, worded as questions: the agent should confirm them in git before passing --rename."""
+    trn, crn = parse_renames(renames)
+    old_by, new_by = {t["name"]: t for t in old}, {t["name"]: t for t in new}
+    hints = []
+    gone = [t for n, t in old_by.items() if n not in new_by and n not in trn]
+    came = [t for n, t in new_by.items() if n not in old_by and n not in trn.values()]
+    for g in gone:
+        gc = {(c["n"], c["t"]) for c in g["cols"]}
+        for a in came:
+            ac = {(c["n"], c["t"]) for c in a["cols"]}
+            if len(gc | ac) and len(gc & ac) / len(gc | ac) >= 0.6:
+                hints.append(f"table {g['name']} -> {a['name']} ({len(gc & ac)} of {len(gc | ac)} columns identical)")
+    for n, o in old_by.items():
+        t = new_by.get(n) or new_by.get(trn.get(n, ""))
+        if t is None:
+            continue
+        have_new = {c["n"] for c in o["cols"]}
+        have_old = {c["n"] for c in t["cols"]}
+        asked = {(old_c, new_c) for (tn, old_c), new_c in crn.items() if tn in (n, t["name"])}
+        lost = [c for c in o["cols"] if c["n"] not in have_old and not any(c["n"] == x for x, _ in asked)]
+        found = [c for c in t["cols"] if c["n"] not in have_new and not any(c["n"] == y for _, y in asked)]
+        for g in lost:
+            same = [a for a in found if a["t"] == g["t"]]
+            if len(same) == 1:
+                hints.append(f"column {t['name']}.{g['n']} -> {same[0]['n']} (both {g['t'] or 'untyped'})")
+    return hints
 
 
 # ---- DBML writer, for the exporters below -----------------------------------------------------------------------
@@ -573,6 +738,18 @@ def main() -> None:
     r.add_argument("--out", default="schema.html")
     r.add_argument("--title")
     r.add_argument("--expect", type=int, metavar="N", help="fail if the file does not hold exactly N tables (the count from the code)")
+    f = sub.add_parser("diff", help="two DBML (or JSON) files -> HTML page with what changed highlighted")
+    f.add_argument("old", nargs="?", help="old DBML/JSON file (or use --file with --from)")
+    f.add_argument("new", nargs="?", help="new DBML/JSON file")
+    f.add_argument("--file", help="a DBML/JSON file tracked in git; compare its committed versions (with --from, and optionally --to)")
+    f.add_argument("--from", dest="rev_from", metavar="REV", help="old revision (commit, tag, branch)")
+    f.add_argument("--to", dest="rev_to", metavar="REV", help="new revision; default is the file in the working tree")
+    f.add_argument("--out", default="schema-diff.html")
+    f.add_argument("--title")
+    f.add_argument("--rename", action="append", metavar="OLD=NEW",
+                   help="a rename confirmed in the code or git history: old=new for a table, table.old=new for a column (repeatable)")
+    f.add_argument("--old-label", help="name for the old side, e.g. a commit hash or tag")
+    f.add_argument("--new-label", help="name for the new side")
     s = sub.add_parser("sqlalchemy", help="SQLAlchemy models -> DBML (needs sqlalchemy)")
     s.add_argument("models", metavar="MODULE:BASE")
     s.add_argument("--out", default="-")
@@ -584,12 +761,28 @@ def main() -> None:
     d.add_argument("--out", default="-")
     a = ap.parse_args()
 
-    if a.cmd == "render":
+    if a.cmd == "diff":
+        if a.file:
+            if not a.rev_from or a.old or a.new:
+                raise SystemExit("With --file, give --from REV (and optionally --to REV), and no positional files.")
+            old_t = load_from_git(a.rev_from, a.file)
+            new_t = load_from_git(a.rev_to, a.file) if a.rev_to else load_tables(Path(a.file))
+            lo, ln = a.old_label or _short_rev(a.rev_from), a.new_label or (_short_rev(a.rev_to) if a.rev_to else "working tree")
+        else:
+            if not (a.old and a.new):
+                raise SystemExit("Give two files, or --file F --from REV [--to REV].")
+            lo, ln = a.old_label or Path(a.old).name, a.new_label or Path(a.new).name
+            old_t, new_t = load_tables(Path(a.old)), load_tables(Path(a.new))
+        tables, stats = diff_tables(old_t, new_t, a.rename)
+        for h in rename_hints(old_t, new_t, a.rename):
+            print(f"hint: possible rename: {h}. Check git, then pass --rename.", file=sys.stderr)
+        info = dict(stats, old=lo, new=ln)
+        Path(a.out).write_text(to_html(tables, a.title or f"{lo} to {ln}", f"{lo} and {ln}", info))
+        print(f"{a.out}: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items() if v) if any(stats.values())
+              else f"{a.out}: no differences between {lo} and {ln}")
+    elif a.cmd == "render":
         path = Path(a.input)
-        text = path.read_text()
-        tables = parse_json(text) if path.suffix == ".json" else parse_dbml(text)
-        if not tables:
-            raise SystemExit(f"No tables found in {path}.")
+        tables = load_tables(path)
         if a.expect is not None and len(tables) != a.expect:
             raise SystemExit(f"Expected {a.expect} tables but {path.name} has {len(tables)}.")
         _warn_missing_fks(tables)

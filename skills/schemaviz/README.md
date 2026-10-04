@@ -44,6 +44,18 @@ python3 schemaviz.py db postgresql+asyncpg://user:pw@host/db --out schema.dbml  
 Other tools that emit DBML work too: `prisma-dbml-generator`, `drizzle-dbml-generator`, `@dbml/cli`
 (`db2dbml`, `sql2dbml`). Check their output against the code.
 
+## Seeing what a migration changed
+
+Keep the generated DBML in git, then compare any two revisions of it:
+
+```bash
+python3 schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD --out changes.html
+python3 schemaviz.py diff old.dbml new.dbml        # or two files
+```
+
+New tables and columns are green, changed ones amber with what they were, removed ones red and struck through, with a
+count banner and an "only changed tables" filter. Renames are shown when confirmed with `--rename old=new` / `--rename table.old=new` (the diff prints hints for likely ones). See SKILL.md section 4.
+
 ## Files
 
 | File | Purpose |

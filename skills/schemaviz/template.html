@@ -124,6 +124,27 @@
   .ovsvg.front path { opacity: 1; stroke-width: 2.4; }
   .ovsvg.front path.hh { stroke: var(--key); }
   .ovsvg marker path { fill: var(--accent); stroke: none; opacity: 1; }
+  /* change highlighting: always a +, - or ~ marker as well as colour */
+  :root { --add: #1a7f37; --add-soft: #dcf3e2; --del: #c62828; --del-soft: #fbe0e0; --chg: #a15c00; --chg-soft: #fdecc8; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --add: #56d364; --add-soft: #12301b; --del: #ff7b72; --del-soft: #3b1618; --chg: #f0b84f; --chg-soft: #3a2c0e; } }
+  :root[data-theme="dark"] { --add: #56d364; --add-soft: #12301b; --del: #ff7b72; --del-soft: #3b1618; --chg: #f0b84f; --chg-soft: #3a2c0e; }
+  .diffbar { margin-top: 14px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 13px; }
+  .diffbar[hidden], .grid[hidden], h2[hidden], .card[hidden] { display: none; }
+  .diffbar label { margin-left: auto; cursor: pointer; }
+  .dchip { font: 600 12px var(--mono); padding: 1px 7px; border-radius: 4px; }
+  .dchip.added, .dbadge.added { background: var(--add-soft); color: var(--add); }
+  .dchip.removed, .dbadge.removed { background: var(--del-soft); color: var(--del); }
+  .dchip.changed, .dbadge.changed { background: var(--chg-soft); color: var(--chg); }
+  .dbadge { font: 600 10px var(--ui); letter-spacing: .05em; padding: 1px 6px; border-radius: 3px; margin-left: auto; margin-right: 6px; white-space: nowrap; }
+  .card.d-added { border-color: var(--add); box-shadow: 0 0 0 1px var(--add); }
+  .card.d-removed { border-color: var(--del); box-shadow: 0 0 0 1px var(--del); border-style: dashed; }
+  .card.d-changed { border-color: var(--chg); box-shadow: 0 0 0 1px var(--chg); }
+  .card.d-removed > button > :first-child, .card.d-removed > .hd > span:first-child { text-decoration: line-through; text-decoration-color: var(--del); }
+  li.d-added { background: var(--add-soft); } li.d-removed { background: var(--del-soft); } li.d-changed { background: var(--chg-soft); }
+  li.d-removed .n, li.d-removed .t { text-decoration: line-through; }
+  li .dm { font-weight: 700; margin-right: 4px; }
+  li.d-added .dm { color: var(--add); } li.d-removed .dm { color: var(--del); } li.d-changed .dm { color: var(--chg); }
+  li .was { color: var(--chg); font: 11px var(--ui); }
   @media (prefers-reduced-motion: reduce) { .card, .card.flash { transition: none; animation: none; } }
 </style>
 <main>
@@ -134,6 +155,7 @@
     </div>
     <div class="legend"><span><span class="tag">PK</span> primary key</span><span><span class="tag uq">UQ</span> unique</span><span>grey name = nullable</span></div>
   </header>
+  <div class="diffbar" id="diffbar" hidden></div>
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-tables" aria-selected="true" aria-controls="pane-tables">Tables</button>
     <button role="tab" id="tab-map" aria-selected="false" aria-controls="pane-map">Relationships</button>
@@ -178,6 +200,17 @@ const cards = {}; const edges = new Set();
 GROUPS.forEach(g => g.tables.forEach(t => t.cols.forEach(c => { if (c.fk) { edges.add(t.name + '>' + c.fk[0]); } })));
 const related = name => { const s = new Set([name]); edges.forEach(e => { const [a, b] = e.split('>'); if (a === name) s.add(b); if (b === name) s.add(a); }); return s; };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const DIFF = DATA.diff, DMARK = { added: '+', removed: '\u2212', changed: '~' };
+function dTable(card, t) {
+  if (!t.diff) return; card.classList.add('d-' + t.diff);
+  const h = card.querySelector(':scope > button, :scope > .hd');
+  if (h) h.insertBefore(el('span', 'dbadge ' + t.diff, DMARK[t.diff] + ' ' + (t.renamed_from ? 'renamed from ' + t.renamed_from : t.diff)), h.querySelector('small, .close'));
+}
+function dCol(li, c) {
+  if (!c.diff) return; li.classList.add('d-' + c.diff);
+  li.querySelector('.n').prepend(el('span', 'dm', DMARK[c.diff]));
+  if (c.was) li.appendChild(el('span', 'x was', 'was: ' + c.was));
+}
 let sel = null;
 const mapHooks = [];
 function select(name, force) {
@@ -190,13 +223,14 @@ function select(name, force) {
     c.classList.toggle('hit', !!rel && rel.has(n) && n !== sel);
   });
 }
+const sections = [];
 GROUPS.forEach(g => {
-  root.appendChild(el('h2', '', g.name));
-  const grid = el('div', 'grid'); root.appendChild(grid);
+  const h2 = el('h2', '', g.name); root.appendChild(h2);
+  const grid = el('div', 'grid'); root.appendChild(grid); sections.push([h2, grid, g]);
   g.tables.forEach(t => {
     const card = el('section', 'card'); card.id = 't-' + t.name; cards[t.name] = card;
     const b = el('button'); b.type = 'button'; b.append(t.name, el('small', '', t.cols.length + ' cols'));
-    b.onclick = () => select(t.name); card.appendChild(b);
+    b.onclick = () => select(t.name); card.appendChild(b); dTable(card, t);
     if (t.comment) card.appendChild(el('p', 'tcomment', t.comment));
     const ul = el('ul');
     t.cols.forEach(c => {
@@ -213,13 +247,32 @@ GROUPS.forEach(g => {
         if (c.note) x.appendChild(el('span', '', c.note));
         li.appendChild(x);
       }
-      ul.appendChild(li);
+      dCol(li, c); ul.appendChild(li);
     });
     card.appendChild(ul);
     if (t.uniq.length) { const u = el('div', 'uniq'); u.append('Unique together: '); t.uniq.forEach((s, i) => { if (i) u.append(', '); u.appendChild(el('code', '', s)); }); card.appendChild(u); }
     grid.appendChild(card);
   });
 });
+if (DIFF) {
+  document.getElementById('sub').textContent = 'Changes from ' + DIFF.old + ' to ' + DIFF.new + '. Green is new, amber changed, red removed (kept on the page, struck through).';
+  const bar = document.getElementById('diffbar'); bar.hidden = false;
+  const chip = (n, kind, what) => n ? el('span', 'dchip ' + kind, DMARK[kind] + ' ' + n + ' ' + what) : null;
+  const tbl = [chip(DIFF.tables_added, 'added', 'tables added'), chip(DIFF.tables_removed, 'removed', 'tables removed'), chip(DIFF.tables_changed, 'changed', 'tables changed')];
+  const col = [chip(DIFF.cols_added, 'added', 'columns added'), chip(DIFF.cols_removed, 'removed', 'columns removed'), chip(DIFF.cols_changed, 'changed', 'columns changed')];
+  const any = tbl.concat(col).some(Boolean);
+  bar.append(...tbl.concat(col).filter(Boolean));
+  if (!any) bar.append('No differences.');
+  else {
+    const lab = el('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; lab.append(cb, ' Only show changed tables');
+    cb.onchange = () => sections.forEach(([h2, grid, g]) => {
+      let shown = 0;
+      g.tables.forEach(t => { const hide = cb.checked && !t.diff; cards[t.name].hidden = hide; if (!hide) shown++; });
+      h2.hidden = grid.hidden = !shown;
+    });
+    bar.appendChild(lab);
+  }
+}
 document.getElementById('count').textContent = Object.keys(cards).length + ' tables, ' + edges.size + ' table-to-table relationships.' + (HUB ? ' Most tables also point at ' + HUB + '.' : '');
 
 // ---- Relationships tab ----
@@ -351,7 +404,7 @@ document.getElementById('count').textContent = Object.keys(cards).length + ' tab
       const hd = mkEl('div', 'hd'); hd.title = 'Drag to move'; hd.appendChild(mkEl('span', '', t.name));
       const x = mkEl('button', 'close', '×'); x.type = 'button'; x.title = 'Close ' + t.name; x.setAttribute('aria-label', 'Close ' + t.name); x.onclick = () => close(t.name);
       x.onpointerdown = ev => ev.stopPropagation();
-      hd.appendChild(x); card.appendChild(hd);
+      hd.appendChild(x); card.appendChild(hd); dTable(card, t);
       if (t.comment) { const tc = mkEl('p', 'tcomment clamp', t.comment); tc.title = t.comment; card.appendChild(tc); }
       hd.addEventListener('pointerdown', ev => startDrag(ev, o, card));
       const ul = mkEl('ul');
@@ -364,7 +417,7 @@ document.getElementById('count').textContent = Object.keys(cards).length + ' tab
           const go = () => add(c.fk[0], o.level - 1); li.onclick = go; li.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } }; }
         if (c.note) xs.appendChild(mkEl('span', '', c.note));
         if (xs.childNodes.length) li.appendChild(xs);
-        ul.appendChild(li);
+        dCol(li, c); ul.appendChild(li);
       });
       card.appendChild(ul);
       const kids = [...(children[t.name] || [])].filter(n => n !== t.name);
@@ -550,7 +603,7 @@ document.getElementById('count').textContent = Object.keys(cards).length + ' tab
       hd.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(n); } };
       hd.onclick = () => { if (cardMoved) { cardMoved = false; return; } select(n); };
       hd.addEventListener('pointerdown', ev => startCardDrag(ev, n));
-      card.appendChild(hd);
+      card.appendChild(hd); dTable(card, t);
       if (t.comment) { const tc = mkEl('p', 'tcomment clamp', t.comment); tc.title = t.comment; card.appendChild(tc); }
       const ul = mkEl('ul');
       t.cols.forEach(c => {
@@ -562,7 +615,7 @@ document.getElementById('count').textContent = Object.keys(cards).length + ' tab
           const go = () => centerOn(c.fk[0]); li.onclick = go; li.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } }; }
         if (c.note) xs.appendChild(mkEl('span', '', c.note));
         if (xs.childNodes.length) li.appendChild(xs);
-        ul.appendChild(li);
+        dCol(li, c); ul.appendChild(li);
       });
       card.appendChild(ul);
       const kids = [...(children[n] || [])].filter(k => k !== n);
