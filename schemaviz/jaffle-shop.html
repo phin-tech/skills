@@ -1,0 +1,698 @@
+<title>Jaffle Shop (dbt)</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;600;700&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  /* Layout: grouped grids of table cards; click a table to dim everything it is not related to. */
+  :root {
+    --bg: #eef1f4; --card: #ffffff; --ink: #14202b; --muted: #5d6c7a; --line: #d9e0e6;
+    --accent: #0b7a75; --accent-soft: #d6efec; --key: #b4570a; --key-soft: #fbe8d4; --dim: 0.28;
+    --ui: "Instrument Sans", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+  }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+    --bg: #0d141a; --card: #141e26; --ink: #e5edf3; --muted: #8fa1b0; --line: #26343f;
+    --accent: #4fd1c5; --accent-soft: #11332f; --key: #f0a860; --key-soft: #3a2713; color-scheme: dark; } }
+  :root[data-theme="dark"] {
+    --bg: #0d141a; --card: #141e26; --ink: #e5edf3; --muted: #8fa1b0; --line: #26343f;
+    --accent: #4fd1c5; --accent-soft: #11332f; --key: #f0a860; --key-soft: #3a2713; color-scheme: dark; }
+  body { background: var(--bg); color: var(--ink); font: 14px/1.45 var(--ui); padding-inline: 16px; padding-block: 28px 56px; }
+  main { max-width: 1280px; margin: 0 auto; }
+  header { display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between; gap: 12px 24px; margin-bottom: 8px; }
+  h1 { font-size: 28px; line-height: 1.1; margin: 0; letter-spacing: -0.02em; text-wrap: balance; }
+  .sub { color: var(--muted); margin: 6px 0 0; max-width: 62ch; }
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 14px; color: var(--muted); font-size: 12px; align-items: center; }
+  h2 { font-size: 12px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin: 32px 0 12px; display: flex; gap: 10px; align-items: center; }
+  h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 14px; align-items: start; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; min-width: 0; transition: opacity .15s, border-color .15s, box-shadow .15s; }
+  .card.dim { opacity: var(--dim); }
+  .card.hit { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .card.flash { animation: flash 1s ease-out; }
+  @keyframes flash { from { box-shadow: 0 0 0 4px var(--accent); } to { box-shadow: 0 0 0 0 transparent; } }
+  .card > button { all: unset; box-sizing: border-box; display: flex; width: 100%; justify-content: space-between; gap: 8px; align-items: baseline;
+    padding: 10px 12px; cursor: pointer; border-bottom: 1px solid var(--line); font: 600 14px var(--mono); }
+  .card > button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: 8px; }
+  .card > button small { font: 400 11px var(--ui); color: var(--muted); }
+  .card.sel > button { background: var(--accent-soft); }
+  ul { list-style: none; margin: 0; padding: 4px 0; }
+  li { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 8px; padding: 3px 12px; font: 12.5px var(--mono); }
+  li .n { overflow-wrap: anywhere; }
+  li .t { color: var(--muted); font-size: 11.5px; text-align: right; }
+  li .n.nullable { color: var(--muted); }
+  li .x { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font: 11px var(--ui); color: var(--muted); }
+  .tag { font: 600 9.5px var(--ui); letter-spacing: 0.06em; padding: 1px 5px; border-radius: 3px; background: var(--key-soft); color: var(--key); }
+  .tag.uq { background: var(--accent-soft); color: var(--accent); }
+  a.fk { font: 11px var(--mono); color: var(--accent); text-decoration: none; border-bottom: 1px dotted var(--accent); cursor: pointer; }
+  a.fk:hover { background: var(--accent-soft); }
+  .uniq { padding: 6px 12px 10px; border-top: 1px dashed var(--line); color: var(--muted); font: 11px var(--ui); }
+  .uniq code { font: 11px var(--mono); color: var(--ink); }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 12px; }
+  .tabs { display: flex; gap: 4px; margin: 18px 0 0; border-bottom: 1px solid var(--line); }
+  .tabs button { all: unset; box-sizing: border-box; padding: 8px 14px; cursor: pointer; font-weight: 600; color: var(--muted); border-bottom: 2px solid transparent; margin-bottom: -1px; }
+  .tabs button[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--accent); }
+  .tabs button:focus-visible { outline: 2px solid var(--accent); border-radius: 4px; }
+  .mapwrap { overflow-x: auto; margin-top: 16px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+  svg.map { display: block; min-width: 1180px; width: 100%; height: auto; font-family: var(--mono); }
+  .map .colhead { font: 600 10.5px var(--ui); letter-spacing: .1em; text-transform: uppercase; fill: var(--muted); }
+  .map .node { cursor: pointer; transition: opacity .15s; }
+  .map .node rect { fill: var(--card); stroke: var(--line); stroke-width: 1.2; }
+  .map .node text { font-size: 12px; fill: var(--ink); }
+  .map .node:hover rect, .map .node:focus-visible rect { stroke: var(--accent); }
+  .map .node.sel rect { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2; }
+  .map .node.hit rect { stroke: var(--accent); stroke-width: 1.6; }
+  .map .node.dim, .map .edge.dim, .map .bus.dim { opacity: .15; }
+  .map .edge { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: .75; }
+  .map .edge.one { stroke-dasharray: 5 4; }
+  .map .edge.on { stroke-width: 2.4; opacity: 1; }
+  .map .bus { stroke: var(--muted); stroke-width: 1; opacity: .45; fill: none; }
+  .map .bus.on { opacity: 1; stroke: var(--key); stroke-width: 1.6; }
+  .map .barlabel { font-size: 12px; fill: var(--ink); }
+  .map marker path { fill: var(--accent); }
+  .detail { padding: 12px 16px; border-top: 1px solid var(--line); min-height: 4.4em; font-size: 13px; color: var(--muted); }
+  .detail b { font-family: var(--mono); color: var(--ink); }
+  .detail code { font: 12px var(--mono); color: var(--ink); }
+  .detail ul { padding: 4px 0 0; } .detail li { display: block; padding: 1px 0; font: 12.5px var(--ui); }
+  .key { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 12px; color: var(--muted); font-size: 12px; align-items: center; }
+  .key svg { vertical-align: middle; }
+  .xbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; margin-top: 16px; color: var(--muted); font-size: 13px; }
+  .xbar select, .xbar button { font: 13px var(--ui); color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+  .xbar button { cursor: pointer; } .xbar button:hover, .xbar select:hover { border-color: var(--accent); }
+  .xbar :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .xcanvas { overflow: auto; margin-top: 12px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-height: 360px; }
+  .xinner { position: relative; min-width: 100%; }
+  .xcard { position: absolute; width: 280px; z-index: 1; background: var(--bg); }
+  .xcard.drag { z-index: 4; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+  .xcard > .hd { cursor: grab; touch-action: none; user-select: none; }
+  .xcard.drag > .hd { cursor: grabbing; }
+  .xcard > .hd { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line); font: 600 14px var(--mono); }
+  .xcard .close { all: unset; cursor: pointer; color: var(--muted); padding: 0 6px; font: 18px/1 var(--ui); border-radius: 4px; }
+  .xcard .close:hover, .xcard .close:focus-visible { color: var(--ink); background: var(--accent-soft); }
+  .xcard li.fkrow { cursor: pointer; } .xcard li.fkrow:hover, .xcard li.fkrow:focus-visible { background: var(--accent-soft); outline: none; }
+  .xcard li.fkrow .go { color: var(--accent); font: 600 11px var(--ui); }
+  .xcard .refs { padding: 8px 12px 10px; border-top: 1px dashed var(--line); font-size: 11px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+  .xcard .refs button { all: unset; cursor: pointer; font: 11px var(--mono); color: var(--accent); border: 1px solid var(--accent); border-radius: 4px; padding: 1px 6px; }
+  .xcard .refs button:hover, .xcard .refs button:focus-visible { background: var(--accent-soft); }
+  .xcard .refs button[disabled] { cursor: default; color: var(--muted); border-color: var(--line); background: none; }
+  .xsvg { position: absolute; left: 0; top: 0; z-index: 0; pointer-events: none; overflow: visible; }
+  .xsvg path.e { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+  .xsvg path.e.one { stroke-dasharray: 5 4; }
+  .xsvg marker path { fill: var(--accent); }
+  .tcomment { margin: 0; padding: 7px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--line); }
+  .tcomment.clamp { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; font-size: 11.5px; }
+  .xempty { color: var(--muted); padding: 40px 8px; }
+  .ovbar { display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; margin-top: 16px; color: var(--muted); font-size: 13px; }
+  .ovbar select, .ovbar button { font: 13px var(--ui); color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; }
+  .ovbar button { cursor: pointer; min-width: 34px; } .ovbar button:hover, .ovbar select:hover { border-color: var(--accent); }
+  .ovbar :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .ovbar .zoom { font: 12px var(--mono); min-width: 4ch; text-align: right; }
+  .ovbar .grow { flex: 1 1 260px; min-width: 0; }
+  .ovp { position: relative; overflow: hidden; margin-top: 12px; height: clamp(520px, 80vh, 960px); border: 1px solid var(--line); border-radius: 8px; cursor: grab; touch-action: none;
+    background-color: var(--card); background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 22px 22px; }
+  .ovp.grabbing { cursor: grabbing; }
+  .ovw { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .ovw .xcard { user-select: none; background: var(--bg); box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .ovw .xcard > .hd { cursor: grab; box-shadow: inset 0 3px 0 var(--g); }
+  .ovw .xcard.drag { z-index: 4; box-shadow: 0 8px 24px rgba(0,0,0,.28); }
+  .ovw .xcard.drag > .hd { cursor: grabbing; }
+  .ovw .xcard.sel { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+  .ovw .xcard.dim { opacity: .35; }
+  .ovkey { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-size: 12px; color: var(--muted); }
+  .ovkey i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; background: var(--g); }
+  .ovsvg { position: absolute; left: 0; top: 0; pointer-events: none; overflow: visible; }
+  .ovsvg path { fill: none; stroke: var(--accent); stroke-width: 1.5; opacity: .5; }
+  .ovsvg path.hh { stroke: var(--muted); opacity: .3; stroke-width: 1; }
+  .ovsvg path.one { stroke-dasharray: 5 4; }
+  .ovsvg path.dim { opacity: .08; }
+  .ovsvg.front path { opacity: 1; stroke-width: 2.4; }
+  .ovsvg.front path.hh { stroke: var(--key); }
+  .ovsvg marker path { fill: var(--accent); stroke: none; opacity: 1; }
+  /* change highlighting: always a +, - or ~ marker as well as colour */
+  :root { --add: #1a7f37; --add-soft: #dcf3e2; --del: #c62828; --del-soft: #fbe0e0; --chg: #a15c00; --chg-soft: #fdecc8; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --add: #56d364; --add-soft: #12301b; --del: #ff7b72; --del-soft: #3b1618; --chg: #f0b84f; --chg-soft: #3a2c0e; } }
+  :root[data-theme="dark"] { --add: #56d364; --add-soft: #12301b; --del: #ff7b72; --del-soft: #3b1618; --chg: #f0b84f; --chg-soft: #3a2c0e; }
+  .diffbar { margin-top: 14px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 13px; }
+  .diffbar[hidden], .grid[hidden], h2[hidden], .card[hidden] { display: none; }
+  .diffbar label { margin-left: auto; cursor: pointer; }
+  .picker { gap: 8px 12px; margin-bottom: 0; }
+  .picker label { margin-left: 0; color: var(--muted); }
+  .picker select { font: 13px var(--ui); color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; max-width: min(100%, 42ch); }
+  .picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .dwarn { flex-basis: 100%; color: var(--chg); font-size: 12px; }
+  .dchip { font: 600 12px var(--mono); padding: 1px 7px; border-radius: 4px; }
+  .dchip.added, .dbadge.added { background: var(--add-soft); color: var(--add); }
+  .dchip.removed, .dbadge.removed { background: var(--del-soft); color: var(--del); }
+  .dchip.changed, .dbadge.changed { background: var(--chg-soft); color: var(--chg); }
+  .dbadge { font: 600 10px var(--ui); letter-spacing: .05em; padding: 1px 6px; border-radius: 3px; margin-left: auto; margin-right: 6px; white-space: nowrap; }
+  .card.d-added { border-color: var(--add); box-shadow: 0 0 0 1px var(--add); }
+  .card.d-removed { border-color: var(--del); box-shadow: 0 0 0 1px var(--del); border-style: dashed; }
+  .card.d-changed { border-color: var(--chg); box-shadow: 0 0 0 1px var(--chg); }
+  .card.d-removed > button > :first-child, .card.d-removed > .hd > span:first-child { text-decoration: line-through; text-decoration-color: var(--del); }
+  li.d-added { background: var(--add-soft); } li.d-removed { background: var(--del-soft); } li.d-changed { background: var(--chg-soft); }
+  li.d-removed .n, li.d-removed .t { text-decoration: line-through; }
+  li .dm { font-weight: 700; margin-right: 4px; }
+  li.d-added .dm { color: var(--add); } li.d-removed .dm { color: var(--del); } li.d-changed .dm { color: var(--chg); }
+  li .was, .tcomment.was { color: var(--chg); font: 11px var(--ui); }
+  @media (prefers-reduced-motion: reduce) { .card, .card.flash { transition: none; animation: none; } }
+</style>
+<main>
+  <header>
+    <div>
+      <h1 id="h1">Database</h1>
+      <p class="sub" id="sub"></p>
+    </div>
+    <div class="legend"><span><span class="tag">PK</span> primary key</span><span><span class="tag uq">UQ</span> unique</span><span>grey name = nullable</span></div>
+  </header>
+  <div class="diffbar picker" id="picker" hidden>
+    <label for="pfrom">From</label><select id="pfrom"></select>
+    <label for="pto">To</label><select id="pto"></select>
+  </div>
+  <div class="diffbar" id="diffbar" hidden></div>
+  <div class="tabs" role="tablist">
+    <button role="tab" id="tab-tables" aria-selected="true" aria-controls="pane-tables">Tables</button>
+    <button role="tab" id="tab-map" aria-selected="false" aria-controls="pane-map">Relationships</button>
+    <button role="tab" id="tab-explore" aria-selected="false" aria-controls="pane-explore">Explore</button>
+    <button role="tab" id="tab-overview" aria-selected="false" aria-controls="pane-overview">Overview</button>
+  </div>
+  <div id="pane-tables" role="tabpanel" aria-labelledby="tab-tables"><div id="root"></div><p class="hint" id="count"></p></div>
+  <div id="pane-overview" role="tabpanel" aria-labelledby="tab-overview" hidden>
+    <div class="ovbar">
+      <span class="grow">Scroll to zoom, drag the background to pan, drag a table by its name to move it. Click a <b>blue row</b> to jump to the table it points at. Click a table name to light up its links.</span>
+      <label for="ovjump">Jump to</label><select id="ovjump"></select>
+      <button type="button" id="ovout" aria-label="Zoom out">−</button><span class="zoom" id="ovzoom">100%</span><button type="button" id="ovin" aria-label="Zoom in">+</button>
+      <button type="button" id="ovlay">Re-layout</button><button type="button" id="ovfit">Fit all</button><button type="button" id="ov100">100%</button>
+    </div>
+    <div class="ovkey" id="ovkey"></div>
+    <div class="ovp" id="ovp"></div>
+  </div>
+  <div id="pane-explore" role="tabpanel" aria-labelledby="tab-explore" hidden>
+    <div class="xbar">
+      <span>Click a <b>blue row</b> to open the table it points at, on the left. Click a name under <b>Pointed at by</b> to open it on the right. Drag a table by its name to put it where you like.</span>
+      <label for="xadd" style="margin-left:auto">Add a table</label><select id="xadd"></select>
+      <button type="button" id="xtidy">Tidy up</button><button type="button" id="xclear">Clear</button>
+    </div>
+    <div class="xcanvas" id="xcanvas"></div>
+  </div>
+  <div id="pane-map" role="tabpanel" aria-labelledby="tab-map" hidden>
+    <div class="mapwrap"><svg class="map" id="map" role="img" aria-label="Table relationship map"></svg><div class="detail" id="detail"></div></div>
+    <div class="key">
+      <span><svg width="34" height="10"><path d="M0 5H28" stroke="var(--accent)" stroke-width="1.5"/><path d="M28 1l5 4-5 4z" fill="var(--accent)"/></svg> many rows point to one</span>
+      <span><svg width="34" height="10"><path d="M0 5H28" stroke="var(--accent)" stroke-width="1.5" stroke-dasharray="5 4"/><path d="M28 1l5 4-5 4z" fill="var(--accent)"/></svg> one to one</span>
+      <span><svg width="34" height="10"><path d="M0 5H34" stroke="var(--muted)" stroke-width="1"/></svg> belongs to a household</span>
+    </div>
+  </div>
+</main>
+<script>
+const DATA = {"title": "Jaffle Shop (dbt)", "source": "jaffle_shop.dbml", "hub": null, "diff": null, "groups": [{"name": "models", "tables": [{"name": "customers", "comment": "This table has basic information about a customer, as well as some derived facts based on a customer's orders", "group": "models", "cols": [{"n": "customer_id", "t": "integer", "pk": true, "uq": false, "null": false, "note": "This is a unique identifier for a customer"}, {"n": "first_name", "t": "varchar", "pk": false, "uq": false, "null": true, "note": "Customer's first name. PII."}, {"n": "last_name", "t": "varchar", "pk": false, "uq": false, "null": true, "note": "Customer's last name. PII."}, {"n": "first_order", "t": "date", "pk": false, "uq": false, "null": true, "note": "Date (UTC) of a customer's first order"}, {"n": "most_recent_order", "t": "date", "pk": false, "uq": false, "null": true, "note": "Date (UTC) of a customer's most recent order"}, {"n": "number_of_orders", "t": "bigint", "pk": false, "uq": false, "null": true, "note": "Count of the number of orders a customer has placed"}, {"n": "customer_lifetime_value", "t": "double", "pk": false, "uq": false, "null": true}], "uniq": []}, {"name": "orders", "comment": "This table has basic information about orders, as well as some derived facts based on payments", "group": "models", "cols": [{"n": "order_id", "t": "integer", "pk": true, "uq": false, "null": false, "note": "This is a unique identifier for an order"}, {"n": "customer_id", "t": "integer", "pk": false, "uq": false, "null": false, "note": "Foreign key to the customers table", "fk": ["customers", "customer_id", ">"]}, {"n": "order_date", "t": "date", "pk": false, "uq": false, "null": true, "note": "Date (UTC) that the order was placed"}, {"n": "status", "t": "varchar", "pk": false, "uq": false, "null": true, "note": "Orders can be one of the following statuses:"}, {"n": "credit_card_amount", "t": "double", "pk": false, "uq": false, "null": false, "note": "Amount of the order (AUD) paid for by credit card"}, {"n": "coupon_amount", "t": "double", "pk": false, "uq": false, "null": false, "note": "Amount of the order (AUD) paid for by coupon"}, {"n": "bank_transfer_amount", "t": "double", "pk": false, "uq": false, "null": false, "note": "Amount of the order (AUD) paid for by bank transfer"}, {"n": "gift_card_amount", "t": "double", "pk": false, "uq": false, "null": false, "note": "Amount of the order (AUD) paid for by gift card"}, {"n": "amount", "t": "double", "pk": false, "uq": false, "null": false, "note": "Total amount (AUD) of the order"}], "uniq": []}]}, {"name": "seeds", "tables": [{"name": "raw_customers", "comment": "", "group": "seeds", "cols": [{"n": "id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "first_name", "t": "varchar", "pk": false, "uq": false, "null": true}, {"n": "last_name", "t": "varchar", "pk": false, "uq": false, "null": true}], "uniq": []}, {"name": "raw_orders", "comment": "", "group": "seeds", "cols": [{"n": "id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "user_id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "order_date", "t": "date", "pk": false, "uq": false, "null": true}, {"n": "status", "t": "varchar", "pk": false, "uq": false, "null": true}], "uniq": []}, {"name": "raw_payments", "comment": "", "group": "seeds", "cols": [{"n": "id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "order_id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "payment_method", "t": "varchar", "pk": false, "uq": false, "null": true}, {"n": "amount", "t": "integer", "pk": false, "uq": false, "null": true}], "uniq": []}]}, {"name": "staging", "tables": [{"name": "stg_customers", "comment": "", "group": "staging", "cols": [{"n": "customer_id", "t": "integer", "pk": true, "uq": false, "null": false}, {"n": "first_name", "t": "varchar", "pk": false, "uq": false, "null": true}, {"n": "last_name", "t": "varchar", "pk": false, "uq": false, "null": true}], "uniq": []}, {"name": "stg_orders", "comment": "", "group": "staging", "cols": [{"n": "order_id", "t": "integer", "pk": true, "uq": false, "null": false}, {"n": "customer_id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "order_date", "t": "date", "pk": false, "uq": false, "null": true}, {"n": "status", "t": "varchar", "pk": false, "uq": false, "null": true}], "uniq": []}, {"name": "stg_payments", "comment": "", "group": "staging", "cols": [{"n": "payment_id", "t": "integer", "pk": true, "uq": false, "null": false}, {"n": "order_id", "t": "integer", "pk": false, "uq": false, "null": true}, {"n": "payment_method", "t": "varchar", "pk": false, "uq": false, "null": true}, {"n": "amount", "t": "double", "pk": false, "uq": false, "null": true}], "uniq": []}]}]};
+const GROUPS = DATA.groups, HUB = DATA.hub;
+document.getElementById('h1').textContent = DATA.title;
+document.getElementById('sub').textContent = 'Read from ' + DATA.source + ', grouped by what each table is for. Click a table to see what it connects to; click a blue foreign key to jump to the table it points at.';
+const root = document.getElementById('root');
+const cards = {}; const edges = new Set();
+GROUPS.forEach(g => g.tables.forEach(t => t.cols.forEach(c => { if (c.fk) { edges.add(t.name + '>' + c.fk[0]); } })));
+const related = name => { const s = new Set([name]); edges.forEach(e => { const [a, b] = e.split('>'); if (a === name) s.add(b); if (b === name) s.add(a); }); return s; };
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+const DIFF = DATA.diff, DMARK = { added: '+', removed: '\u2212', changed: '~' };
+function dTable(card, t) {
+  if (!t.diff) return; card.classList.add('d-' + t.diff);
+  const h = card.querySelector(':scope > button, :scope > .hd');
+  if (t.was) { const w = el('p', 'tcomment was', t.was); if (h) h.after(w); }
+  if (h) h.insertBefore(el('span', 'dbadge ' + t.diff, DMARK[t.diff] + ' ' + (t.renamed_from ? 'renamed from ' + t.renamed_from : t.diff)), h.querySelector('small, .close'));
+}
+function dCol(li, c) {
+  if (!c.diff) return; li.classList.add('d-' + c.diff);
+  li.querySelector('.n').prepend(el('span', 'dm', DMARK[c.diff]));
+  if (c.was) li.appendChild(el('span', 'x was', 'was: ' + c.was));
+}
+let sel = null;
+const mapHooks = [];
+function select(name, force) {
+  sel = (sel === name && !force) ? null : name;
+  const rel = sel ? related(sel) : null;
+  mapHooks.forEach(f => f(rel));
+  Object.entries(cards).forEach(([n, c]) => {
+    c.classList.toggle('sel', n === sel);
+    c.classList.toggle('dim', !!rel && !rel.has(n));
+    c.classList.toggle('hit', !!rel && rel.has(n) && n !== sel);
+  });
+}
+const sections = [];
+GROUPS.forEach(g => {
+  const h2 = el('h2', '', g.name); root.appendChild(h2);
+  const grid = el('div', 'grid'); root.appendChild(grid); sections.push([h2, grid, g]);
+  g.tables.forEach(t => {
+    const card = el('section', 'card'); card.id = 't-' + t.name; cards[t.name] = card;
+    const b = el('button'); b.type = 'button'; b.append(t.name, el('small', '', t.cols.length + ' cols'));
+    b.onclick = () => select(t.name); card.appendChild(b); dTable(card, t);
+    if (t.comment) card.appendChild(el('p', 'tcomment', t.comment));
+    const ul = el('ul');
+    t.cols.forEach(c => {
+      const li = el('li'); const n = el('span', 'n' + (c.null ? ' nullable' : ''), c.n);
+      li.append(n, el('span', 't', c.t));
+      const tags = [];
+      if (c.pk) tags.push(['PK', 'tag']); if (c.uq) tags.push(['UQ', 'tag uq']);
+      if (tags.length || c.fk || c.note) {
+        const x = el('span', 'x');
+        tags.forEach(([txt, cls]) => x.appendChild(el('span', cls, txt)));
+        if (c.fk) { const a = el('a', 'fk', '→ ' + c.fk[0] + '.' + c.fk[1]); a.href = '#t-' + c.fk[0];
+          a.onclick = ev => { ev.preventDefault(); const target = cards[c.fk[0]]; target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            target.classList.remove('flash'); void target.offsetWidth; target.classList.add('flash'); }; x.appendChild(a); }
+        if (c.note) x.appendChild(el('span', '', c.note));
+        li.appendChild(x);
+      }
+      dCol(li, c); ul.appendChild(li);
+    });
+    card.appendChild(ul);
+    if (t.uniq.length) { const u = el('div', 'uniq'); u.append('Unique together: '); t.uniq.forEach((s, i) => { if (i) u.append(', '); u.appendChild(el('code', '', s)); }); card.appendChild(u); }
+    grid.appendChild(card);
+  });
+});
+if (DIFF && DIFF.picker) {
+  const P = DIFF.picker, bar = document.getElementById('picker'); bar.hidden = false;
+  const fill = (sel, opts, cur) => { opts.forEach(o => { const e = document.createElement('option'); e.value = o.v; e.textContent = o.label; sel.appendChild(e); }); sel.value = cur; };
+  const pf = document.getElementById('pfrom'), pt = document.getElementById('pto');
+  fill(pf, P.revs, P.from); fill(pt, [{ v: 'WORKTREE', label: 'working tree' }].concat(P.revs), P.to);
+  const go = () => { location.search = '?from=' + encodeURIComponent(pf.value) + '&to=' + encodeURIComponent(pt.value); };
+  pf.onchange = go; pt.onchange = go;
+}
+if (DIFF) {
+  document.getElementById('sub').textContent = 'Changes from ' + DIFF.old + ' to ' + DIFF.new + '. Green is new, amber changed, red removed (kept on the page, struck through).';
+  const bar = document.getElementById('diffbar'); bar.hidden = false;
+  const chip = (n, kind, what) => n ? el('span', 'dchip ' + kind, DMARK[kind] + ' ' + n + ' ' + what) : null;
+  const tbl = [chip(DIFF.tables_added, 'added', 'tables added'), chip(DIFF.tables_removed, 'removed', 'tables removed'), chip(DIFF.tables_changed, 'changed', 'tables changed')];
+  const col = [chip(DIFF.cols_added, 'added', 'columns added'), chip(DIFF.cols_removed, 'removed', 'columns removed'), chip(DIFF.cols_changed, 'changed', 'columns changed')];
+  const any = tbl.concat(col).some(Boolean);
+  bar.append(...tbl.concat(col).filter(Boolean));
+  (DIFF.warnings || []).forEach(w => bar.appendChild(el('div', 'dwarn', 'Note: ' + w)));
+  if (!any) bar.append('No differences.');
+  else {
+    const lab = el('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; lab.append(cb, ' Only show changed tables');
+    cb.onchange = () => sections.forEach(([h2, grid, g]) => {
+      let shown = 0;
+      g.tables.forEach(t => { const hide = cb.checked && !t.diff; cards[t.name].hidden = hide; if (!hide) shown++; });
+      h2.hidden = grid.hidden = !shown;
+    });
+    bar.appendChild(lab);
+  }
+}
+document.getElementById('count').textContent = Object.keys(cards).length + ' tables, ' + edges.size + ' table-to-table relationships.' + (HUB ? ' Most tables also point at ' + HUB + '.' : '');
+
+// ---- Relationships tab ----
+(function () {
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.getElementById('map'), detail = document.getElementById('detail');
+  const mk = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); Object.entries(attrs || {}).forEach(([k, v]) => e.setAttribute(k, v)); if (parent) parent.appendChild(e); return e; };
+  const byName = {}; GROUPS.forEach(g => g.tables.forEach(t => byName[t.name] = t));
+  const COLS = GROUPS.map(g => [g.name, g.tables.map(t => t.name).filter(n => n !== HUB)]).filter(c => c[1].length);
+  const NCOL = COLS.length, NROW = Math.max(...COLS.map(c => c[1].length));
+  const W = 190, H = 30, GX = 250, X0 = 26, Y0 = HUB ? 150 : 60, GY = 54, BAR = [26, 46, GX * (NCOL - 1) + W, 38];
+  const pos = {};
+  COLS.forEach(([, names], ci) => names.forEach((n, ri) => pos[n] = { x: X0 + ci * GX, y: Y0 + ri * GY, col: ci, row: ri }));
+  svg.setAttribute('viewBox', '0 0 ' + (X0 * 2 + GX * (NCOL - 1) + W + 24) + ' ' + (Y0 + NROW * GY + 10));
+  mk('defs', {}, svg).innerHTML = '<marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0 1L10 5L0 9z"/></marker>';
+
+  // edges between tables other than the hub
+  const edges = [];
+  Object.values(byName).forEach(t => t.cols.forEach(c => { if (c.fk && c.fk[0] !== HUB && pos[t.name] && pos[c.fk[0]]) edges.push({ from: t.name, to: c.fk[0], col: c.n, ref: c.fk[1], one: c.fk[2] === '-' || c.uq && !c.pk && false }); }));
+  edges.forEach(e => { const c = byName[e.from].cols.find(x => x.n === e.col); e.one = c.fk[2] === '-'; });
+
+  // spread anchors on a node side
+  const slots = {};
+  const slot = (n, side) => { const k = n + side; slots[k] = (slots[k] || 0) + 1; return k; };
+  edges.forEach(e => { const a = pos[e.from], b = pos[e.to]; e.same = a.col === b.col; e.sa = e.same ? 'R' : (a.col < b.col ? 'R' : 'L'); e.sb = e.same ? 'R' : (a.col < b.col ? 'L' : 'R'); e.ka = slot(e.from, e.sa); e.kb = slot(e.to, e.sb); });
+  const total = {}; Object.keys(slots).forEach(k => total[k] = slots[k]); const used = {};
+  const anchor = (k, n, side) => { const i = used[k] = (used[k] || 0); used[k]++; const p = pos[n]; const off = (i - (total[k] - 1) / 2) * 7; return { x: p.x + (side === 'R' ? W : 0), y: p.y + H / 2 + off }; };
+
+  const gEdges = mk('g', {}, svg), gBus = mk('g', {}, svg), gNodes = mk('g', {}, svg);
+  COLS.forEach(([title], ci) => { const t = mk('text', { x: X0 + ci * GX, y: Y0 - 14, class: 'colhead' }, svg); t.textContent = title; });
+
+  edges.forEach(e => {
+    const a = anchor(e.ka, e.from, e.sa), b = anchor(e.kb, e.to, e.sb);
+    let d;
+    if (e.same) { const r = 24 + 12 * Math.abs(pos[e.from].row - pos[e.to].row); d = 'M' + a.x + ' ' + a.y + ' C' + (a.x + r) + ' ' + a.y + ' ' + (b.x + r) + ' ' + b.y + ' ' + b.x + ' ' + b.y; }
+    else { const dx = Math.max(40, Math.abs(b.x - a.x) * .5), s = a.x < b.x ? 1 : -1; d = 'M' + a.x + ' ' + a.y + ' C' + (a.x + s * dx) + ' ' + a.y + ' ' + (b.x - s * dx) + ' ' + b.y + ' ' + b.x + ' ' + b.y; }
+    const p = mk('path', { d, class: 'edge' + (e.one ? ' one' : ''), 'marker-end': 'url(#arr)' }, gEdges);
+    mk('title', {}, p).textContent = e.from + '.' + e.col + ' → ' + e.to + '.' + e.ref + (e.one ? ' (one to one)' : ' (many to one)');
+    e.el = p;
+  });
+
+  // the hub table as a bar, and a thin line from it to every table that points at it
+  const nodes = {}; const buses = {};
+  if (HUB) {
+    const bar = mk('g', { class: 'node', tabindex: 0, role: 'button', 'aria-label': HUB }, gNodes);
+    mk('rect', { x: BAR[0], y: BAR[1], width: BAR[2], height: BAR[3], rx: 6 }, bar);
+    mk('text', { x: BAR[0] + 14, y: BAR[1] + 24, class: 'barlabel' }, bar).textContent = HUB;
+    const st = mk('text', { x: BAR[0] + BAR[2] - 14, y: BAR[1] + 24, 'text-anchor': 'end', class: 'colhead' }, bar); st.textContent = 'tables that point here have a line down to them';
+    nodes[HUB] = bar;
+    Object.values(byName).forEach(t => {
+      if (t.name === HUB || !pos[t.name] || !t.cols.some(c => c.fk && c.fk[0] === HUB)) return;
+      const p = pos[t.name], bx = p.x - 12, y = p.y + H / 2;
+      buses[t.name] = mk('path', { d: 'M' + bx + ' ' + (BAR[1] + BAR[3]) + ' V' + y + ' H' + p.x, class: 'bus' }, gBus);
+    });
+  }
+  Object.keys(pos).forEach(n => {
+    const p = pos[n], g = mk('g', { class: 'node', tabindex: 0, role: 'button', 'aria-label': n }, gNodes);
+    mk('rect', { x: p.x, y: p.y, width: W, height: H, rx: 6 }, g);
+    mk('text', { x: p.x + 12, y: p.y + 20 }, g).textContent = n; nodes[n] = g;
+  });
+
+  const stats = n => {
+    const out = [], inc = [];
+    byName[n].cols.forEach(c => { if (c.fk) out.push(c.n + ' → ' + c.fk[0] + '.' + c.fk[1] + (c.fk[2] === '-' ? ' (one to one)' : '')); });
+    Object.values(byName).forEach(t => t.cols.forEach(c => { if (c.fk && c.fk[0] === n) inc.push(t.name + '.' + c.n); }));
+    return { out, inc };
+  };
+  const list = (label, items) => items.length ? '<div>' + label + '</div><ul>' + items.map(i => '<li><code>' + i + '</code></li>').join('') + '</ul>' : '';
+  const hint = 'Click a table to see what it connects to.' + (HUB ? ' The grey lines go to ' + HUB + '.' : '');
+  detail.textContent = hint;
+
+  mapHooks.push(rel => {
+    Object.entries(nodes).forEach(([n, g]) => { g.classList.toggle('sel', n === sel); g.classList.toggle('hit', !!rel && rel.has(n) && n !== sel); g.classList.toggle('dim', !!rel && !rel.has(n)); });
+    edges.forEach(e => { const on = sel && (e.from === sel || e.to === sel); e.el.classList.toggle('on', !!on); e.el.classList.toggle('dim', !!sel && !on); });
+    Object.entries(buses).forEach(([n, p]) => { const on = sel && (n === sel || sel === HUB); p.classList.toggle('on', !!on); p.classList.toggle('dim', !!sel && !on); });
+    if (!sel) { detail.textContent = hint; return; }
+    const s = stats(sel);
+    detail.innerHTML = '<b>' + sel + '</b>' + (byName[sel].comment ? '<p>' + byName[sel].comment.replace(/[<&]/g, ch => ch === '<' ? '&lt;' : '&amp;') + '</p>' : '') + list('Points at', s.out) + list('Pointed at by', s.inc) + '<p><a class="fk" id="goexp" href="#explore">Open in Explore</a></p>';
+    document.getElementById('goexp').onclick = ev => { ev.preventDefault(); window.exploreOpen(sel); };
+  });
+  Object.entries(nodes).forEach(([n, g]) => { g.onclick = () => select(n); g.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(n); } }; });
+})();
+
+// ---- Explore tab ----
+(function () {
+  const canvas = document.getElementById('xcanvas'), addSel = document.getElementById('xadd');
+  const byName = {}; GROUPS.forEach(g => g.tables.forEach(t => byName[t.name] = t));
+  const children = {}; Object.values(byName).forEach(t => t.cols.forEach(c => { if (c.fk) (children[c.fk[0]] = children[c.fk[0]] || new Set()).add(t.name); }));
+  const STEP = 380, CW = 280, PAD = 20;
+  let open = [];  // {name, level, x, y}; x and y are null until laid out; x may be negative before shifting
+  let flash = null, inner = null, svg = null, cardEls = {}, shift = { x: 0, y: 0 };
+  const mkEl = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const find = n => open.find(x => x.name === n);
+  function add(name, level) {
+    if (find(name)) { flash = name; render(); return; }
+    open.push({ name, level, x: level * STEP, y: null }); flash = name; render();
+  }
+  function close(name) { open = open.filter(x => x.name !== name); render(); }
+  function tidy() { open.forEach(o => { o.x = o.level * STEP; o.y = null; }); render(); }
+
+  function place() {
+    // give cards without a y the next free slot below the others at the same x
+    open.forEach(o => {
+      if (o.y !== null) return;
+      let y = 0;
+      open.forEach(q => { if (q !== o && q.y !== null && Math.abs(q.x - o.x) < CW) { const c = cardEls[q.name]; y = Math.max(y, q.y + c.offsetHeight + 16); } });
+      o.y = y;
+    });
+    const minX = Math.min(...open.map(o => o.x)), minY = Math.min(...open.map(o => o.y));
+    shift = { x: PAD - minX, y: PAD - minY };
+    open.forEach(o => { const c = cardEls[o.name]; c.style.left = (o.x + shift.x) + 'px'; c.style.top = (o.y + shift.y) + 'px'; });
+    size();
+  }
+  function size() {
+    let w = 0, h = 0;
+    open.forEach(o => { const c = cardEls[o.name]; w = Math.max(w, o.x + shift.x + CW); h = Math.max(h, o.y + shift.y + c.offsetHeight); });
+    inner.style.width = (w + PAD) + 'px'; inner.style.height = (h + PAD) + 'px';
+  }
+
+  function render() {
+    canvas.textContent = ''; cardEls = {};
+    if (!open.length) { canvas.appendChild(mkEl('p', 'xempty', 'Nothing open. Add a table from the list above.')); return; }
+    inner = mkEl('div', 'xinner'); canvas.appendChild(inner);
+    svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('class', 'xsvg');
+    svg.innerHTML = '<defs><marker id="xarr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 1L10 5L0 9z"/></marker></defs>';
+    inner.appendChild(svg);
+    open.forEach(o => {
+      const t = byName[o.name], card = mkEl('section', 'card xcard'); cardEls[o.name] = card;
+      const hd = mkEl('div', 'hd'); hd.title = 'Drag to move'; hd.appendChild(mkEl('span', '', t.name));
+      const x = mkEl('button', 'close', '×'); x.type = 'button'; x.title = 'Close ' + t.name; x.setAttribute('aria-label', 'Close ' + t.name); x.onclick = () => close(t.name);
+      x.onpointerdown = ev => ev.stopPropagation();
+      hd.appendChild(x); card.appendChild(hd); dTable(card, t);
+      if (t.comment) { const tc = mkEl('p', 'tcomment clamp', t.comment); tc.title = t.comment; card.appendChild(tc); }
+      hd.addEventListener('pointerdown', ev => startDrag(ev, o, card));
+      const ul = mkEl('ul');
+      t.cols.forEach(c => {
+        const li = mkEl('li', c.fk ? 'fkrow' : ''); li.dataset.col = c.n;
+        li.append(mkEl('span', 'n' + (c.null ? ' nullable' : ''), c.n), mkEl('span', 't', c.t));
+        const xs = mkEl('span', 'x');
+        if (c.pk) xs.appendChild(mkEl('span', 'tag', 'PK')); if (c.uq) xs.appendChild(mkEl('span', 'tag uq', 'UQ'));
+        if (c.fk) { xs.appendChild(mkEl('span', 'go', '→ ' + c.fk[0] + '.' + c.fk[1])); li.tabIndex = 0; li.setAttribute('role', 'button');
+          const go = () => add(c.fk[0], o.level - 1); li.onclick = go; li.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } }; }
+        if (c.note) xs.appendChild(mkEl('span', '', c.note));
+        if (xs.childNodes.length) li.appendChild(xs);
+        dCol(li, c); ul.appendChild(li);
+      });
+      card.appendChild(ul);
+      const kids = [...(children[t.name] || [])].filter(n => n !== t.name);
+      if (kids.length) {
+        const r = mkEl('div', 'refs'); r.append('Pointed at by');
+        kids.forEach(k => { const b = mkEl('button', '', k); b.type = 'button'; if (find(k)) b.title = 'Already open'; b.onclick = () => add(k, o.level + 1); r.appendChild(b); });
+        card.appendChild(r);
+      }
+      if (flash === o.name) card.classList.add('flash');
+      inner.appendChild(card);
+    });
+    place();
+    requestAnimationFrame(() => { draw(); if (flash && cardEls[flash]) cardEls[flash].scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' }); flash = null; });
+  }
+
+  function draw() {
+    if (!inner) return;
+    svg.querySelectorAll('path.e').forEach(p => p.remove());
+    const base = inner.getBoundingClientRect();
+    svg.setAttribute('width', inner.offsetWidth); svg.setAttribute('height', inner.offsetHeight);
+    const rowRect = (card, col) => { const li = card.querySelector('li[data-col="' + col + '"]'); const r = li.getBoundingClientRect(); return { l: r.left - base.left, r: r.right - base.left, y: r.top - base.top + r.height / 2 }; };
+    open.forEach(o => byName[o.name].cols.forEach(c => {
+      if (!c.fk || !cardEls[c.fk[0]]) return;
+      const a = rowRect(cardEls[o.name], c.n), b = rowRect(cardEls[c.fk[0]], c.fk[1]);
+      let d;
+      if (b.r < a.l - 10) { const dx = Math.max(30, (a.l - b.r) / 2); d = `M${a.l} ${a.y} C${a.l - dx} ${a.y} ${b.r + dx} ${b.y} ${b.r} ${b.y}`; }
+      else if (b.l > a.r + 10) { const dx = Math.max(30, (b.l - a.r) / 2); d = `M${a.r} ${a.y} C${a.r + dx} ${a.y} ${b.l - dx} ${b.y} ${b.l} ${b.y}`; }
+      else d = `M${a.r} ${a.y} C${a.r + 50} ${a.y} ${b.r + 50} ${b.y} ${b.r} ${b.y}`;
+      const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', d); path.setAttribute('class', 'e' + (c.fk[2] === '-' ? ' one' : '')); path.setAttribute('marker-end', 'url(#xarr)'); svg.appendChild(path);
+    }));
+  }
+
+  let drag = null;
+  function startDrag(ev, o, card) {
+    if (ev.button !== 0) return; ev.preventDefault();
+    drag = { o, card, sx: ev.clientX, sy: ev.clientY, ox: o.x, oy: o.y }; card.classList.add('drag');
+  }
+  window.addEventListener('pointermove', ev => {
+    if (!drag) return;
+    const { o, card } = drag;
+    o.x = Math.max(-shift.x + 0, drag.ox + (ev.clientX - drag.sx)); o.y = Math.max(-shift.y + 0, drag.oy + (ev.clientY - drag.sy));
+    card.style.left = (o.x + shift.x) + 'px'; card.style.top = (o.y + shift.y) + 'px';
+    size(); draw();
+  });
+  window.addEventListener('pointerup', () => { if (drag) { drag.card.classList.remove('drag'); drag = null; } });
+
+  Object.keys(byName).sort().forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; addSel.appendChild(o); });
+  const ph = document.createElement('option'); ph.textContent = 'Choose…'; ph.value = ''; addSel.insertBefore(ph, addSel.firstChild); addSel.value = '';
+  addSel.onchange = () => { if (addSel.value) { const ls = open.map(o => o.level); add(addSel.value, ls.length ? Math.max(...ls) : 0); addSel.value = ''; } };
+  document.getElementById('xclear').onclick = () => { open = []; render(); };
+  document.getElementById('xtidy').onclick = tidy;
+  window.addEventListener('resize', () => { if (!document.getElementById('pane-explore').hidden) draw(); });
+  window.exploreRender = render;
+  window.exploreOpen = name => { open = []; add(name, 0); window.showTab('explore'); };
+  const deg = {}; Object.values(byName).forEach(t => t.cols.forEach(c => { if (c.fk && c.fk[0] !== HUB && t.name !== HUB && c.fk[0] !== t.name) { deg[t.name] = (deg[t.name] || 0) + 1; deg[c.fk[0]] = (deg[c.fk[0]] || 0) + 1; } }));
+  const start = Object.keys(byName).sort((a, b) => (deg[b] || 0) - (deg[a] || 0))[0];
+  open = [{ name: start, level: 0, x: 0, y: null }];
+})();
+
+// ---- Overview tab: every table on a pan and zoom canvas, placed by a force-directed layout ----
+(function () {
+  const vp = document.getElementById('ovp'), jump = document.getElementById('ovjump'), zoomLbl = document.getElementById('ovzoom'), keyEl = document.getElementById('ovkey');
+  const byName = {}; GROUPS.forEach(g => g.tables.forEach(t => byName[t.name] = t));
+  const children = {}; Object.values(byName).forEach(t => t.cols.forEach(c => { if (c.fk) (children[c.fk[0]] = children[c.fk[0]] || new Set()).add(t.name); }));
+  const groupOf = {}; GROUPS.forEach((g, i) => g.tables.forEach(t => groupOf[t.name] = i));
+  const hue = i => (200 + i * 67) % 360;
+  const CW = 280, PAD = 70;
+  const mkEl = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+  const NS = 'http://www.w3.org/2000/svg';
+  let world, back, front, cards = {}, node = {}, edges = [], sel = null, built = false, seed = 7;
+  const v = { x: 0, y: 0, k: 1 };
+  const apply = () => { world.style.transform = 'translate(' + v.x + 'px,' + v.y + 'px) scale(' + v.k + ')'; zoomLbl.textContent = Math.round(v.k * 100) + '%'; };
+  const glide = () => { world.style.transition = 'transform .4s ease'; clearTimeout(glide.t); glide.t = setTimeout(() => world.style.transition = '', 450); };
+  const snap = () => { world.style.transition = ''; };
+
+  function zoomAt(cx, cy, k2) { k2 = Math.min(2.5, Math.max(0.08, k2)); v.x = cx - (cx - v.x) * (k2 / v.k); v.y = cy - (cy - v.y) * (k2 / v.k); v.k = k2; apply(); }
+  function fit() {
+    const w = world.offsetWidth, h = world.offsetHeight, r = vp.getBoundingClientRect();
+    const k = Math.min(r.width / w, r.height / h, 1);
+    v.k = k; v.x = (r.width - w * k) / 2; v.y = (r.height - h * k) / 2; glide(); apply();
+  }
+  function centerOn(name) {
+    const n = node[name], r = vp.getBoundingClientRect(), k = Math.max(v.k, 0.9);
+    v.k = k; v.x = r.width / 2 - (n.x + n.w / 2) * k; v.y = r.height / 2 - (n.y + Math.min(n.h, 420) / 2) * k; glide(); apply();
+    const c = cards[name]; c.classList.remove('flash'); void c.offsetWidth; c.classList.add('flash');
+  }
+
+  // ---- force-directed placement ----
+  // Tables are rectangles. Foreign keys pull tables together, every pair pushes apart, tables of one section
+  // gather, and the hub table (which almost everything points at) is only loosely tethered so it doesn't make a star.
+  function layout() {
+    const names = Object.keys(node); let s = seed; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+    const ng = GROUPS.length, R = 260 + names.length * 12;
+    names.forEach(n => { const a = 2 * Math.PI * groupOf[n] / ng; const q = node[n]; q.cx = Math.cos(a) * R + (rnd() - .5) * 320; q.cy = Math.sin(a) * R + (rnd() - .5) * 320; q.fx = 0; q.fy = 0; });
+    const links = []; const seen = new Set();
+    edges.forEach(e => { if (e.to === HUB || e.from === HUB || e.from === e.to) return; const k = e.from < e.to ? e.from + '|' + e.to : e.to + '|' + e.from; if (!seen.has(k)) { seen.add(k); links.push([node[e.from], node[e.to]]); } });
+    const push = (q, dx, dy) => { q.fx += dx; q.fy += dy; };
+    const MARGIN = 48, ITER = 700;
+    for (let it = 0; it < ITER; it++) {
+      const alpha = Math.max(0.03, 1 - it / (ITER * .75));
+      names.forEach(n => { node[n].fx = 0; node[n].fy = 0; });
+      for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++) {
+        const a = node[names[i]], b = node[names[j]]; let dx = b.cx - a.cx, dy = b.cy - a.cy; const d2 = dx * dx + dy * dy + 400, d = Math.sqrt(d2);
+        const f = 2e6 * alpha / d2; dx /= d; dy /= d; push(a, -dx * f, -dy * f); push(b, dx * f, dy * f);
+      }
+      links.forEach(([a, b]) => {
+        let dx = b.cx - a.cx, dy = b.cy - a.cy; const d = Math.sqrt(dx * dx + dy * dy) + 0.01, L = 270 + (a.h + b.h) / 5;
+        const f = (d - L) * 0.06; dx /= d; dy /= d; push(a, dx * f, dy * f); push(b, -dx * f, -dy * f);
+      });
+      const gc = {}; names.forEach(n => { const g = groupOf[n]; (gc[g] = gc[g] || { x: 0, y: 0, c: 0 }); gc[g].x += node[n].cx; gc[g].y += node[n].cy; gc[g].c++; });
+      names.forEach(n => {
+        const q = node[n], g = gc[groupOf[n]];
+        if (n === HUB) { q.fx -= q.cx * 0.02; q.fy -= q.cy * 0.02; return; }
+        push(q, (g.x / g.c - q.cx) * 0.012, (g.y / g.c - q.cy) * 0.012); push(q, -q.cx * 0.004, -q.cy * 0.004);
+      });
+      names.forEach(n => { const q = node[n]; const m = Math.hypot(q.fx, q.fy), cap = 70; const sc = m > cap ? cap / m : 1; q.cx += q.fx * sc * 0.5; q.cy += q.fy * sc * 0.5; });
+      for (let r = 0; r < 2; r++) separate(names, MARGIN);
+    }
+    for (let r = 0; r < 60; r++) separate(names, MARGIN);
+    place();
+  }
+  function separate(names, margin) {
+    for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++) {
+      const a = node[names[i]], b = node[names[j]]; const dx = b.cx - a.cx, dy = b.cy - a.cy;
+      const ox = (a.w + b.w) / 2 + margin - Math.abs(dx), oy = (a.h + b.h) / 2 + margin - Math.abs(dy);
+      if (ox > 0 && oy > 0) {
+        if (ox < oy) { const m = ox / 2 * (dx >= 0 ? 1 : -1); a.cx -= m; b.cx += m; } else { const m = oy / 2 * (dy >= 0 ? 1 : -1); a.cy -= m; b.cy += m; }
+      }
+    }
+  }
+  function place() {
+    const ns = Object.values(node); const minX = Math.min(...ns.map(q => q.cx - q.w / 2)), minY = Math.min(...ns.map(q => q.cy - q.h / 2));
+    ns.forEach(q => { q.x = q.cx - q.w / 2 - minX + PAD; q.y = q.cy - q.h / 2 - minY + PAD; });
+    sync(); drawEdges(); fit(); snap();
+  }
+  function sync() {
+    let w = 0, h = 0;
+    Object.entries(node).forEach(([n, q]) => { cards[n].style.left = q.x + 'px'; cards[n].style.top = q.y + 'px'; w = Math.max(w, q.x + q.w); h = Math.max(h, q.y + q.h); });
+    world.style.width = (w + PAD) + 'px'; world.style.height = (h + PAD) + 'px';
+  }
+
+  // ---- edges, drawn from the foreign-key row to the key row it points at ----
+  function drawEdges() {
+    back.querySelectorAll('path.e').forEach(p => p.remove()); front.querySelectorAll('path').forEach(p => p.remove());
+    back.setAttribute('width', world.offsetWidth); back.setAttribute('height', world.offsetHeight);
+    front.setAttribute('width', world.offsetWidth); front.setAttribute('height', world.offsetHeight);
+    edges = [];
+    const rowY = (n, col) => { const li = cards[n].querySelector('li[data-col="' + col + '"]'); return node[n].y + li.offsetTop + li.offsetHeight / 2; };
+    Object.values(byName).forEach(t => t.cols.forEach(c => {
+      if (!c.fk) return;
+      const A = node[t.name], B = node[c.fk[0]], ay = rowY(t.name, c.n), by = rowY(c.fk[0], c.fk[1]); let d;
+      if (B.x + B.w < A.x - 10) { const dx = Math.max(40, (A.x - B.x - B.w) / 2); d = `M${A.x} ${ay} C${A.x - dx} ${ay} ${B.x + B.w + dx} ${by} ${B.x + B.w} ${by}`; }
+      else if (B.x > A.x + A.w + 10) { const dx = Math.max(40, (B.x - A.x - A.w) / 2); d = `M${A.x + A.w} ${ay} C${A.x + A.w + dx} ${ay} ${B.x - dx} ${by} ${B.x} ${by}`; }
+      else { const ax = A.x + A.w, bx = B.x + B.w, r = 50 + Math.min(80, Math.abs(ay - by) / 6); d = `M${ax} ${ay} C${ax + r} ${ay} ${bx + r} ${by} ${bx} ${by}`; }
+      const p = document.createElementNS(NS, 'path'); p.setAttribute('d', d); p.setAttribute('class', 'e ' + (c.fk[2] === '-' ? 'one ' : '') + (c.fk[0] === HUB ? 'hh' : '')); p.setAttribute('marker-end', 'url(#ovarr)');
+      const ti = document.createElementNS(NS, 'title'); ti.textContent = t.name + '.' + c.n + ' → ' + c.fk[0] + '.' + c.fk[1]; p.appendChild(ti);
+      back.appendChild(p); edges.push({ from: t.name, to: c.fk[0], one: c.fk[2] === '-', d, el: p });
+    }));
+    applySel();
+  }
+  const relatedTo = n => { const s = new Set([n]); edges.forEach(e => { if (e.from === n) s.add(e.to); if (e.to === n) s.add(e.from); }); return s; };
+  function applySel() {
+    const rel = sel ? relatedTo(sel) : null;
+    Object.entries(cards).forEach(([n, c]) => { c.classList.toggle('sel', n === sel); c.classList.toggle('dim', !!rel && !rel.has(n)); });
+    front.querySelectorAll('path').forEach(p => p.remove());
+    edges.forEach(e => {
+      const on = sel && (e.from === sel || e.to === sel); e.el.classList.toggle('dim', !!sel && !on);
+      if (on) { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', e.d); p.setAttribute('class', (e.one ? 'one ' : '') + (e.to === HUB ? 'hh' : '')); p.setAttribute('marker-end', 'url(#ovarr)'); front.appendChild(p); }
+    });
+  }
+  function select(name) { sel = sel === name ? null : name; applySel(); }
+
+  function build() {
+    vp.textContent = '';
+    world = mkEl('div', 'ovw'); vp.appendChild(world);
+    back = document.createElementNS(NS, 'svg'); back.setAttribute('class', 'ovsvg');
+    back.innerHTML = '<defs><marker id="ovarr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto"><path d="M0 1L10 5L0 9z"/></marker></defs>';
+    world.appendChild(back);
+    GROUPS.forEach((g, gi) => g.tables.forEach(t => {
+      const n = t.name, card = mkEl('section', 'card xcard'); card.id = 'ov-' + n; cards[n] = card; card.style.setProperty('--g', 'hsl(' + hue(gi) + ' 60% 52%)');
+      const hd = mkEl('div', 'hd'); hd.appendChild(mkEl('span', '', n)); hd.appendChild(mkEl('small', '', t.cols.length + ' cols')); hd.tabIndex = 0; hd.setAttribute('role', 'button');
+      hd.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); select(n); } };
+      hd.onclick = () => { if (cardMoved) { cardMoved = false; return; } select(n); };
+      hd.addEventListener('pointerdown', ev => startCardDrag(ev, n));
+      card.appendChild(hd); dTable(card, t);
+      if (t.comment) { const tc = mkEl('p', 'tcomment clamp', t.comment); tc.title = t.comment; card.appendChild(tc); }
+      const ul = mkEl('ul');
+      t.cols.forEach(c => {
+        const li = mkEl('li', c.fk ? 'fkrow' : ''); li.dataset.col = c.n;
+        li.append(mkEl('span', 'n' + (c.null ? ' nullable' : ''), c.n), mkEl('span', 't', c.t));
+        const xs = mkEl('span', 'x');
+        if (c.pk) xs.appendChild(mkEl('span', 'tag', 'PK')); if (c.uq) xs.appendChild(mkEl('span', 'tag uq', 'UQ'));
+        if (c.fk) { xs.appendChild(mkEl('span', 'go', '→ ' + c.fk[0] + '.' + c.fk[1])); li.tabIndex = 0; li.setAttribute('role', 'button');
+          const go = () => centerOn(c.fk[0]); li.onclick = go; li.onkeydown = ev => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); go(); } }; }
+        if (c.note) xs.appendChild(mkEl('span', '', c.note));
+        if (xs.childNodes.length) li.appendChild(xs);
+        dCol(li, c); ul.appendChild(li);
+      });
+      card.appendChild(ul);
+      const kids = [...(children[n] || [])].filter(k => k !== n);
+      if (kids.length && n !== HUB) { const r = mkEl('div', 'refs'); r.append('Pointed at by'); kids.forEach(k => { const b = mkEl('button', '', k); b.type = 'button'; b.onclick = () => centerOn(k); r.appendChild(b); }); card.appendChild(r); }
+      world.appendChild(card);
+    }));
+    front = document.createElementNS(NS, 'svg'); front.setAttribute('class', 'ovsvg front'); front.style.zIndex = 5; world.appendChild(front);
+    Object.keys(cards).forEach(n => { node[n] = { x: 0, y: 0, w: CW, h: cards[n].offsetHeight, cx: 0, cy: 0 }; });
+    keyEl.textContent = '';
+    GROUPS.forEach((g, gi) => { const sp = mkEl('span', '', g.name); const i = mkEl('i'); i.style.setProperty('--g', 'hsl(' + hue(gi) + ' 60% 52%)'); sp.prepend(i); keyEl.appendChild(sp); });
+    requestAnimationFrame(() => { drawEdges(); layout(); });
+  }
+
+  // ---- moving a table, panning and zooming ----
+  let cardDrag = null, cardMoved = false, drag = null, moved = false;
+  function startCardDrag(ev, n) {
+    if (ev.button !== 0) return; ev.stopPropagation(); cardMoved = false;
+    cardDrag = { n, sx: ev.clientX, sy: ev.clientY, ox: node[n].x, oy: node[n].y };
+  }
+  vp.addEventListener('wheel', e => { e.preventDefault(); snap(); const r = vp.getBoundingClientRect(); zoomAt(e.clientX - r.left, e.clientY - r.top, v.k * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015))); }, { passive: false });
+  vp.addEventListener('pointerdown', e => { if (e.button !== 0 || cardDrag) return; drag = { x: e.clientX, y: e.clientY, vx: v.x, vy: v.y }; moved = false; });
+  window.addEventListener('pointermove', e => {
+    if (cardDrag) {
+      const dx = (e.clientX - cardDrag.sx) / v.k, dy = (e.clientY - cardDrag.sy) / v.k;
+      if (!cardMoved && Math.hypot(dx, dy) * v.k < 5) return;
+      if (!cardMoved) { cardMoved = true; cards[cardDrag.n].classList.add('drag'); snap(); }
+      const q = node[cardDrag.n]; q.x = Math.max(0, cardDrag.ox + dx); q.y = Math.max(0, cardDrag.oy + dy);
+      sync(); drawEdges(); return;
+    }
+    if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!moved && Math.hypot(dx, dy) < 5) return;
+    if (!moved) { moved = true; snap(); vp.classList.add('grabbing'); }
+    v.x = drag.vx + dx; v.y = drag.vy + dy; apply();
+  });
+  window.addEventListener('pointerup', () => {
+    if (cardDrag) { cards[cardDrag.n].classList.remove('drag'); cardDrag = null; setTimeout(() => cardMoved = false, 0); }
+    drag = null; vp.classList.remove('grabbing');
+  });
+  vp.addEventListener('click', e => { if (moved) { e.stopPropagation(); e.preventDefault(); moved = false; } }, true);
+  const step = f => { const r = vp.getBoundingClientRect(); snap(); glide(); zoomAt(r.width / 2, r.height / 2, v.k * f); };
+  document.getElementById('ovin').onclick = () => step(1.3);
+  document.getElementById('ovout').onclick = () => step(1 / 1.3);
+  document.getElementById('ovfit').onclick = () => fit();
+  document.getElementById('ov100').onclick = () => { const r = vp.getBoundingClientRect(); glide(); zoomAt(r.width / 2, r.height / 2, 1); };
+  document.getElementById('ovlay').onclick = () => { seed = (seed * 48271 + 11) % 2147483647; layout(); };
+  const ph = document.createElement('option'); ph.value = ''; ph.textContent = 'Choose a table…'; jump.appendChild(ph);
+  Object.keys(byName).sort().forEach(n => { const o = document.createElement('option'); o.value = n; o.textContent = n; jump.appendChild(o); });
+  jump.onchange = () => { if (jump.value) { centerOn(jump.value); jump.value = ''; } };
+  window.overviewShow = () => { if (!built) { built = true; build(); } };
+})();
+
+// ---- Tabs ----
+(function () {
+  const ids = ['tables', 'map', 'explore', 'overview']; const tabs = {};
+  ids.forEach(k => tabs[k] = [document.getElementById('tab-' + k), document.getElementById('pane-' + (k === 'tables' ? 'tables' : k))]);
+  window.showTab = k => { Object.entries(tabs).forEach(([n, [b, p]]) => { b.setAttribute('aria-selected', n === k); p.hidden = n !== k; }); if (k === 'explore') window.exploreRender(); if (k === 'overview') window.overviewShow();
+    try { history.replaceState(null, '', location.pathname + location.search + '#' + k); } catch (e) {} };
+  Object.entries(tabs).forEach(([n, [b]]) => b.onclick = () => window.showTab(n));
+  if (tabs[location.hash.slice(1)]) window.showTab(location.hash.slice(1));
+})();
+</script>

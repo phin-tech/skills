@@ -1,0 +1,57 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>schemaviz</title>
+<style>
+  :root { --bg: #f4f6f8; --card: #fff; --ink: #14202b; --muted: #5a6978; --line: #d8dfe6; --accent: #0b7a75; --code: #eaeef2; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #0d141a; --card: #141e26; --ink: #e5edf3; --muted: #93a4b3; --line: #26343f; --accent: #4fd1c5; --code: #1a2630; color-scheme: dark; } }
+  :root[data-theme="dark"] { --bg: #0d141a; --card: #141e26; --ink: #e5edf3; --muted: #93a4b3; --line: #26343f; --accent: #4fd1c5; --code: #1a2630; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 48px 16px 64px; }
+  main { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 34px; line-height: 1.1; margin: 0 0 8px; letter-spacing: -0.02em; }
+  .lede { color: var(--muted); margin: 0 0 32px; max-width: 58ch; text-wrap: pretty; }
+  h2 { font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); margin: 36px 0 12px; }
+  .samples { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr)); }
+  a.card { display: block; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; color: inherit; text-decoration: none; }
+  a.card:hover, a.card:focus-visible { border-color: var(--accent); outline: none; }
+  a.card b { display: block; font-size: 18px; margin-bottom: 4px; }
+  a.card span { color: var(--muted); font-size: 14px; }
+  a.card code { font-size: 12.5px; }
+  pre, code { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  pre { background: var(--code); border-radius: 8px; padding: 14px 16px; overflow-x: auto; font-size: 13.5px; margin: 0 0 10px; }
+  code { background: var(--code); border-radius: 4px; padding: 1px 5px; font-size: .92em; }
+  a.card code { background: transparent; padding: 0; }
+  p { margin: 0 0 12px; } a { color: var(--accent); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+</style>
+<main>
+  <h1>schemaviz</h1>
+  <p class="lede">Draw a database schema as an interactive page, and see exactly what a migration changed. Point it at a repository, a SQL dump, a dbt project or a live database.</p>
+
+  <h2>Samples</h2>
+  <div class="samples">
+    <a class="card" href="recipe-diff.html">
+      <b>What a migration changed</b>
+      <span>A made-up recipe app, before and after. A renamed table, a retyped column, a new table and a dropped one, marked in place. <code>schemaviz diff</code></span>
+    </a>
+    <a class="card" href="jaffle-shop.html">
+      <b>A repository, scanned</b>
+      <span>dbt Labs' open-source <code>jaffle_shop</code>, drawn from its folder with real warehouse types. <code>schemaviz scan jaffle_shop_duckdb</code></span>
+    </a>
+  </div>
+
+  <h2>Try it</h2>
+  <pre>brew install phin-tech/tap/schemaviz
+
+schemaviz scan ./your-repo --out schema.dbml
+schemaviz open schema.dbml</pre>
+  <p>Compare two points in history, with a revision picker in the page:</p>
+  <pre>schemaviz open docs/schema.dbml --from v1.4 --to HEAD</pre>
+
+  <footer>
+    <a href="https://github.com/phin-tech/skills/tree/main/skills/schemaviz">Source and docs</a>.
+    The jaffle_shop schema comes from <a href="https://github.com/dbt-labs/jaffle_shop_duckdb">dbt-labs/jaffle_shop_duckdb</a>.
+    The recipe app is invented for this page.
+  </footer>
+</main>
