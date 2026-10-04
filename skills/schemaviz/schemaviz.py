@@ -22,7 +22,26 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-HERE = Path(__file__).parent
+__version__ = "0.2.0"
+
+
+def _resource_dir() -> Path:
+    """Where template.html lives: next to this file (a checkout or the skill folder), inside a PyInstaller bundle, or
+    in the shared-data folder a `pip`/`uv tool` install puts it in."""
+    if getattr(sys, "_MEIPASS", None):
+        return Path(sys._MEIPASS)
+    here = Path(__file__).resolve().parent
+    if (here / "template.html").exists():
+        return here
+    import site
+
+    for base in (sys.prefix, getattr(site, "USER_BASE", None)):  # a venv / uv tool install, or `pip install --user`
+        if base and (Path(base) / "share" / "schemaviz" / "template.html").exists():
+            return Path(base) / "share" / "schemaviz"
+    return Path(sys.prefix) / "share" / "schemaviz"
+
+
+HERE = _resource_dir()
 
 
 # ---- DBML reader ------------------------------------------------------------------------------------------------
@@ -389,7 +408,7 @@ def to_html(tables: list[dict], title: str, source: str, diff: dict | None = Non
     hub = find_hub(tables)
     assign_groups(tables, hub)
     data = json.dumps({"title": title, "source": source, "hub": hub, "diff": diff, "groups": order_groups(tables, hub)}, ensure_ascii=False)
-    html = (HERE / "template.html").read_text()
+    html = (HERE / "template.html").read_text(encoding="utf-8")
     return html.replace("/*TITLE*/", re.sub(r"[<>&]", "", title)).replace("/*DATA*/{}", data.replace("</", "<\\/"))
 
 
@@ -401,17 +420,75 @@ def parse_text(text: str, name: str) -> list[dict]:
 
 
 def load_tables(path: Path) -> list[dict]:
-    return parse_text(path.read_text(), path.name)
+    return parse_text(path.read_text(encoding="utf-8"), path.name)
+
+
+_REV_OK = re.compile(r"^[\w./~^@{}+-]+$")
+
+
+def _check_rev(rev: str) -> str:
+    if not _REV_OK.match(rev) or rev.startswith("-"):
+        raise SystemExit(f"not a usable git revision: {rev!r}")
+    return rev
 
 
 def git_text(rev: str, file: str) -> str:
     """The contents of `file` as committed at `rev` (any tag, branch or commit), read with `git show`."""
     import subprocess
 
-    r = subprocess.run(["git", "show", f"{rev}:./{file}"], capture_output=True, text=True)
+    path = Path(file).resolve()
+    r = subprocess.run(["git", "show", f"{_check_rev(rev)}:./{path.name}"], capture_output=True, encoding="utf-8", errors="replace", cwd=path.parent)
     if r.returncode:
         raise SystemExit(f"git could not read {file} at {rev}: {r.stderr.strip()}")
     return r.stdout
+
+
+def list_revs(file: str, limit: int = 40) -> list[dict]:
+    """Tags, branches and recent commits of `file`, for the revision picker."""
+    import subprocess
+
+    path = Path(file).resolve()
+    out, seen = [{"v": "HEAD", "label": "HEAD"}], {"HEAD"}
+
+    def git(*args: str) -> list[str]:
+        r = subprocess.run(["git", *args], capture_output=True, encoding="utf-8", errors="replace", cwd=path.parent)
+        return r.stdout.splitlines() if r.returncode == 0 else []
+
+    for ref in git("for-each-ref", "--sort=-creatordate", f"--count={limit}", "--format=%(refname:short)", "refs/tags", "refs/heads"):
+        if ref not in seen and _REV_OK.match(ref):
+            out.append({"v": ref, "label": ref}); seen.add(ref)
+    for ln in git("log", f"-n{limit}", "--format=%h\t%s", "--", path.name):
+        sha, _, subject = ln.partition("\t")
+        if sha not in seen:
+            out.append({"v": sha, "label": f"{sha}  {subject[:60]}"}); seen.add(sha)
+    return out
+
+
+def _diff_inputs(a) -> tuple:
+    """(old text, new text, (name, name), old label, new label) from the arguments of diff / publish."""
+    if a.file:
+        if not a.rev_from or a.old or a.new:
+            raise SystemExit("With --file, give --from REV (and optionally --to REV), and no positional files.")
+        old_x = git_text(a.rev_from, a.file)
+        new_x = git_text(a.rev_to, a.file) if a.rev_to else Path(a.file).read_text(encoding="utf-8")
+        return old_x, new_x, (a.file, a.file), a.old_label or _short_rev(a.rev_from), a.new_label or (_short_rev(a.rev_to) if a.rev_to else "working tree")
+    if not (a.old and a.new):
+        raise SystemExit("Give two files, or --file F --from REV [--to REV].")
+    return Path(a.old).read_text(encoding="utf-8"), Path(a.new).read_text(encoding="utf-8"), (a.old, a.new), a.old_label or Path(a.old).name, a.new_label or Path(a.new).name
+
+
+def diff_page(old_x: str, new_x: str, names: tuple, lo: str, ln: str, renames=None, notes=False, title=None, picker=None) -> tuple[str, dict, list]:
+    """The HTML for the changes between two DBML/JSON texts, and the counts."""
+    old_t, new_t = parse_text(old_x, names[0]), parse_text(new_x, names[1])
+    so, sn = header_source(old_x), header_source(new_x)
+    if so and sn and so != sn:
+        print(f"warning: the two files were generated from different sources ({so} vs {sn}); type spellings and "
+              "constraints can differ for that reason alone, so some changes below may not be real.", file=sys.stderr)
+    tables, stats = diff_tables(old_t, new_t, renames, notes)
+    for h in rename_hints(old_t, new_t, renames):
+        print(f"hint: possible rename: {h}. Check git, then pass --rename.", file=sys.stderr)
+    info = dict(stats, old=lo, new=ln, picker=picker)
+    return to_html(tables, title or f"{lo} to {ln}", f"{lo} and {ln}", info), stats, tables
 
 
 def header_source(text: str) -> str:
@@ -943,7 +1020,7 @@ def _read_sql(text: str) -> list[dict]:
 
 def export_sql(path: str, dialect: str = "") -> str:
     p = Path(path)
-    tables = _read_sql(p.read_text())
+    tables = _read_sql(p.read_text(encoding="utf-8"))
     if not tables:
         raise SystemExit(f"No CREATE TABLE statements found in {path}.")
     return to_dbml(tables, f"sql {p.name}", f"sql {dialect}".strip() if dialect else "sql dump")
@@ -1125,9 +1202,9 @@ def _dbt_constraint(col: dict, ct: dict) -> None:
 
 def export_dbt(manifest_path: str, catalog_path: str | None, with_sources: bool) -> str:
     mp = Path(manifest_path)
-    manifest = json.loads(mp.read_text())
+    manifest = json.loads(mp.read_text(encoding="utf-8"))
     cp = Path(catalog_path) if catalog_path else mp.with_name("catalog.json")
-    catalog = json.loads(cp.read_text()) if cp.exists() else None
+    catalog = json.loads(cp.read_text(encoding="utf-8")) if cp.exists() else None
     if catalog is None and catalog_path:
         raise SystemExit(f"{catalog_path} not found.")
     tables = _read_dbt(manifest, catalog, with_sources)
@@ -1194,27 +1271,272 @@ def _warn_missing_fks(tables: list) -> None:
 # ---- command line -----------------------------------------------------------------------------------------------
 
 
+# ---- PR-ready summary and static site: `schemaviz publish` -------------------------------------------------------
+
+MARKER = "<!-- schemaviz -->"  # lets a CI job find and update its own comment instead of adding a new one
+
+
+def _mm(s: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_]", "_", s) or "x"
+
+
+def _mermaid(tables: list[dict], limit: int = 18) -> str:
+    """A Mermaid erDiagram of the tables that changed (GitHub draws these in comments). Types are sanitised: Mermaid
+    rejects parentheses and angle brackets."""
+    picked = [t for t in tables if t.get("diff") in ("added", "changed")][:limit]
+    names = {t["name"] for t in picked}
+    if not picked:
+        return ""
+    out = ["erDiagram"]
+    for t in picked:
+        rows = [c for c in t["cols"] if t.get("diff") == "added" or c.get("diff") or c["pk"] or "fk" in c][:14]
+        out.append(f"  {_mm(t['name'])} {{")
+        for c in rows:
+            key = " PK" if c["pk"] else " FK" if "fk" in c else ""
+            base = _mm(re.split(r"[(<\[]", norm_type(c["t"]) or "unknown")[0].strip() or "unknown")  # varchar(255) -> varchar
+            tag = {"added": "new", "removed": "dropped", "changed": "changed"}.get(c.get("diff") or t.get("diff") and "", "")
+            out.append(f"    {base} {_mm(c['n'])}{key}" + (f' "{tag}"' if tag else ""))
+        out.append("  }")
+    for t in picked:
+        for c in t["cols"]:
+            if "fk" in c and c["fk"][0] in names and c.get("diff") != "removed":
+                out.append(f"  {_mm(c['fk'][0])} ||--{'o|' if c['fk'][2] == '-' else 'o{'} {_mm(t['name'])} : \"{_mm(c['n'])}\"")
+    return "\n".join(out)
+
+
+def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = "", limit: int = 60000) -> str:
+    """The schema changes as Markdown for a pull request comment (GitHub allows 65,536 characters). Built from whole blocks,
+    so staying under `limit` never leaves a <details> or a code fence open."""
+    n = lambda k, w: f"{stats[k]} {w}" if stats.get(k) else ""  # noqa: E731
+    bits = [x for x in (n("tables_added", "added"), n("tables_removed", "removed"), n("tables_changed", "changed")) if x]
+    cols = [x for x in (n("cols_added", "added"), n("cols_removed", "removed"), n("cols_changed", "changed")) if x]
+    head = [MARKER, f"### Schema changes: `{lo}` to `{ln}`", ""]
+    if not bits:
+        return "\n".join(head + ["No schema changes."]) + "\n"
+    head.append(f"**Tables:** {', '.join(bits)}. **Columns:** {', '.join(cols) or 'none changed'}." +
+                (f" [Open the interactive view]({url})." if url else ""))
+    blocks = ["\n".join(head)]
+    for kind, title, sign in (("added", "New tables", "+"), ("removed", "Dropped tables", "\u2212")):
+        group = [t for t in tables if t.get("diff") == kind]
+        if group:
+            blocks.append("\n".join([f"**{title}**", ""] + [f"- {sign} `{t['name']}` ({len(t['cols'])} columns)" for t in group]))
+    mark = {"added": "+", "removed": "\u2212", "changed": "~"}
+    details = []
+    for t in (t for t in tables if t.get("diff") == "changed"):
+        title = t["name"] + (f" (renamed from {t['renamed_from']})" if t.get("renamed_from") else "")  # no markdown inside <b>
+        rows = [c for c in t["cols"] if c.get("diff")]
+        lines = [f"<details><summary><b>{title}</b>: {len(rows)} column change{'s' if len(rows) != 1 else ''}</summary>", "",
+                 "| | column | type | what changed |", "|---|---|---|---|"]
+        for c in rows:
+            lines.append(f"| {mark[c['diff']]} | `{c['n']}` | `{c['t'] or 'unknown'}` | "
+                         f"{c.get('was') or {'added': 'new column', 'removed': 'dropped'}[c['diff']]} |")
+        if t.get("was"):
+            lines.append(f"| ~ | | | {t['was']} |")
+        details.append("\n".join(lines + ["", "</details>"]))
+    mm = _mermaid(tables)
+    diagram = "\n".join(["<details><summary>Relationship diagram of the tables that changed</summary>", "", "```mermaid", mm, "```", "", "</details>"]) if mm else ""
+    out, used, left = [], 0, len(details)
+    reserve = 220  # room for the truncation note
+    for b in blocks:
+        out.append(b); used += len(b) + 2
+    if diagram and used + len(diagram) + reserve < limit:  # the diagram only goes in whole
+        out.append(diagram); used += len(diagram) + 2
+    for d in details:
+        if used + len(d) + 2 + reserve > limit:
+            break
+        out.append(d); used += len(d) + 2; left -= 1
+    if left:
+        out.append(f"_{left} more changed table{'s' if left != 1 else ''} not shown to stay within GitHub's comment size limit. "
+                   "The full list is in the interactive view._")
+    return "\n\n".join(out) + "\n"
+
+
+def publish(a) -> None:
+    """Write a static folder: index.html (open it anywhere), summary.md (paste into a PR), schema.dbml and manifest.json.
+    Uploading is left to whatever tool you already use (aws s3 cp, gsutil, gh, a Pages deploy)."""
+    old_x, new_x, names, lo, ln = _diff_inputs(a)
+    html, stats, tables = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title)
+    out = Path(a.out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    files = {"index.html": html, "summary.md": diff_markdown(tables, stats, lo, ln, a.url or ""), "schema.dbml": new_x}
+    for name, text in files.items():
+        (out / name).write_text(text, encoding="utf-8")
+    manifest = {"schemaviz": __version__, "old": lo, "new": ln, "changes": stats, "has_changes": any(stats.values()),
+                "entry": "index.html", "files": [{"path": n, "bytes": len(t.encode()), "type": "text/html" if n.endswith(".html")
+                                                  else "text/markdown" if n.endswith(".md") else "text/plain"} for n, t in files.items()]}
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"{out}/: {', '.join(files)}, manifest.json  ({'no changes' if not manifest['has_changes'] else ', '.join(f'{v} {k.replace(chr(95), chr(32))}' for k, v in stats.items() if v)})")
+
+
+# ---- local server: `schemaviz open` ------------------------------------------------------------------------------
+
+
+class _View:
+    """What `schemaviz open` shows: one DBML file, or (with revisions) what changed in it between two commits."""
+
+    def __init__(self, file, diff=False, rev_from=None, rev_to=None, renames=None, notes=False, title=None):
+        self.file, self.diff, self.rev_from, self.rev_to = str(file), diff, rev_from, rev_to
+        self.renames, self.notes, self.title = renames, notes, title
+
+    def inputs(self, query: dict) -> tuple[dict, str]:
+        """Read what the page is drawn from, and a version that changes whenever it does. Cheap and silent: the open page
+        asks for the version every second or so, and only a changed version makes it fetch the page again."""
+        import hashlib
+
+        text = Path(self.file).read_text(encoding="utf-8")
+        if not self.diff:
+            return {"text": text}, hashlib.sha1(text.encode()).hexdigest()
+        a = (query.get("from") or [self.rev_from or "HEAD"])[0]
+        b = (query.get("to") or [self.rev_to or "WORKTREE"])[0]
+        old_x = git_text(a, self.file)
+        new_x = text if b == "WORKTREE" else git_text(b, self.file)
+        return {"a": a, "b": b, "old_x": old_x, "new_x": new_x}, hashlib.sha1((old_x + "\0" + new_x).encode()).hexdigest()
+
+    def render(self, inp: dict) -> str:
+        if not self.diff:
+            tables = parse_text(inp["text"], self.file)
+            return to_html(tables, self.title or Path(self.file).stem.replace("_", " ").replace("-", " ").title(), Path(self.file).name)
+        a, b = inp["a"], inp["b"]
+        revs = list_revs(self.file)
+        for r in (a, b):
+            if r != "WORKTREE" and all(x["v"] != r for x in revs):
+                revs.append({"v": r, "label": r})
+        html, _, _ = diff_page(inp["old_x"], inp["new_x"], (self.file, self.file), _short_rev(a),
+                               "working tree" if b == "WORKTREE" else _short_rev(b), self.renames, self.notes, self.title,
+                               {"revs": revs, "from": a, "to": b})
+        return html
+
+
+_RELOAD = """<script>(function(){var v=%s;function poll(){fetch('/__version'+location.search,{cache:'no-store'})
+.then(function(r){return r.text()}).then(function(t){if(t!==v)location.reload()}).catch(function(){})
+.then(function(){setTimeout(poll,1500)})}setTimeout(poll,1500)})();</script>"""
+
+
+def make_server(view: _View, port: int = 0):
+    """An HTTP server bound to localhost only. Call serve_forever() on it."""
+    from html import escape
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import parse_qs, urlparse
+
+    class Handler(BaseHTTPRequestHandler):
+        def _send(self, code: int, body: str, kind: str = "text/html; charset=utf-8") -> None:
+            data = body.encode()
+            self.send_response(code)
+            self.send_header("Content-Type", kind)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self) -> None:
+            if self.headers.get("Host", "").rsplit(":", 1)[0] not in ("127.0.0.1", "localhost"):
+                return self._send(403, "forbidden", "text/plain")  # DNS-rebinding guard
+            u = urlparse(self.path)
+            query = parse_qs(u.query)
+            if u.path not in ("/", "/__version"):
+                return self._send(404, "not found", "text/plain")
+            html = None
+            try:
+                inp, version = view.inputs(query)
+                if u.path == "/":
+                    html = view.render(inp)
+            except (SystemExit, Exception) as e:  # keep serving: the page recovers when the problem is fixed
+                err = str(e) if str(e) else type(e).__name__
+                version = "error:" + err
+                html = ("<title>schemaviz</title><body style=\"font:15px system-ui;padding:24px;max-width:70ch\"><h1>Cannot draw this</h1>"
+                        f"<pre style=\"white-space:pre-wrap\">{escape(err)}</pre><p>This page reloads when the file or git state changes.</p></body>")
+            if u.path == "/__version":
+                return self._send(200, version, "text/plain")
+            self._send(200, html + _RELOAD % json.dumps(version))
+
+        def log_message(self, *args) -> None:
+            pass
+
+    return ThreadingHTTPServer(("127.0.0.1", port), Handler)
+
+
+def serve(view: _View, port: int, open_browser: bool) -> None:
+    server = make_server(view, port)
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    print(f"schemaviz: serving {view.file} at {url}  (Ctrl-C to stop)")
+    if open_browser:
+        import webbrowser
+
+        webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped")
+    finally:
+        server.server_close()
+
+
+def doctor() -> int:
+    """Report what works on this machine. Exit status 1 only when something every command needs is missing."""
+    import importlib.util
+    import shutil
+    import subprocess
+
+    ok = True
+    print(f"schemaviz {__version__}, Python {sys.version.split()[0]}")
+    tpl = HERE / "template.html"
+    print(f"  {'ok     ' if tpl.exists() else 'MISSING'}  page template   {tpl}")
+    ok = ok and tpl.exists()
+    git = shutil.which("git")
+    ver = subprocess.run([git, "--version"], capture_output=True, encoding="utf-8", errors="replace").stdout.strip() if git else ""
+    print(f"  {'ok     ' if git else 'missing'}  git             {ver or 'needed only for: diff --file ... --from REV'}")
+    for mod, why in (("sqlalchemy", "sqlalchemy and db commands"), ("django", "django command (run inside the project's environment)")):
+        found = importlib.util.find_spec(mod) is not None
+        print(f"  {'ok     ' if found else 'missing'}  {mod:<15} {'' if found else 'needed only for the ' + why}")
+    print("  always available: render, diff, sql, dbt  (standard library only)")
+    return 0 if ok else 1
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    for stream in (sys.stdout, sys.stderr):  # a Windows console may default to cp1252
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+    ap = argparse.ArgumentParser(prog="schemaviz", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"schemaviz {__version__}")
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    sub.add_parser("doctor", help="check what this install can do (git, optional packages, template)")
+    o = sub.add_parser("open", help="serve a DBML file in your browser; reloads when it changes. With --from/--to, shows what changed between commits, with a picker")
+    o.add_argument("file", help="DBML/JSON file; for revisions it must be tracked in git")
+    o.add_argument("--from", dest="rev_from", metavar="REV", help="old revision: turns on the changes view (default to: the working tree)")
+    o.add_argument("--to", dest="rev_to", metavar="REV", help="new revision (default: the working tree)")
+    o.add_argument("--rename", action="append", metavar="OLD=NEW", help="a confirmed rename (repeatable), as for diff")
+    o.add_argument("--notes", action="store_true", help="also report edited notes as changes")
+    o.add_argument("--title")
+    o.add_argument("--port", type=int, default=0, help="default: any free port")
+    o.add_argument("--no-open", action="store_true", help="print the address but do not open a browser")
     r = sub.add_parser("render", help="DBML (or JSON) file -> HTML page")
     r.add_argument("input")
     r.add_argument("--out", default="schema.html")
     r.add_argument("--title")
     r.add_argument("--expect", type=int, metavar="N", help="fail if the file does not hold exactly N tables (the count from the code)")
-    f = sub.add_parser("diff", help="two DBML (or JSON) files -> HTML page with what changed highlighted")
-    f.add_argument("old", nargs="?", help="old DBML/JSON file (or use --file with --from)")
-    f.add_argument("new", nargs="?", help="new DBML/JSON file")
-    f.add_argument("--file", help="a DBML/JSON file tracked in git; compare its committed versions (with --from, and optionally --to)")
-    f.add_argument("--from", dest="rev_from", metavar="REV", help="old revision (commit, tag, branch)")
-    f.add_argument("--to", dest="rev_to", metavar="REV", help="new revision; default is the file in the working tree")
+    def diff_args(p) -> None:
+        p.add_argument("old", nargs="?", help="old DBML/JSON file (or use --file with --from)")
+        p.add_argument("new", nargs="?", help="new DBML/JSON file")
+        p.add_argument("--file", help="a DBML/JSON file tracked in git; compare its committed versions (with --from, and optionally --to)")
+        p.add_argument("--from", dest="rev_from", metavar="REV", help="old revision (commit, tag, branch)")
+        p.add_argument("--to", dest="rev_to", metavar="REV", help="new revision; default is the file in the working tree")
+        p.add_argument("--title")
+        p.add_argument("--notes", action="store_true", help="also report edited notes as changes (off by default: notes get reworded)")
+        p.add_argument("--rename", action="append", metavar="OLD=NEW",
+                       help="a rename confirmed in the code or git history: old=new for a table, table.old=new for a column (repeatable)")
+        p.add_argument("--old-label", help="name for the old side, e.g. a commit hash or tag")
+        p.add_argument("--new-label", help="name for the new side")
+
+    f = sub.add_parser("diff", help="two DBML (or JSON) files, or two git revisions of one -> HTML page with what changed highlighted")
+    diff_args(f)
     f.add_argument("--out", default="schema-diff.html")
-    f.add_argument("--title")
-    f.add_argument("--notes", action="store_true", help="also report edited notes as changes (off by default: notes get reworded)")
-    f.add_argument("--rename", action="append", metavar="OLD=NEW",
-                   help="a rename confirmed in the code or git history: old=new for a table, table.old=new for a column (repeatable)")
-    f.add_argument("--old-label", help="name for the old side, e.g. a commit hash or tag")
-    f.add_argument("--new-label", help="name for the new side")
+    f.add_argument("--md", metavar="FILE", help="also write the changes as Markdown (for a pull request comment)")
+    pb = sub.add_parser("publish", help="write a static folder (index.html, summary.md, schema.dbml, manifest.json) for another tool to upload")
+    diff_args(pb)
+    pb.add_argument("--out-dir", default="schemaviz-site")
+    pb.add_argument("--url", default="", help="where index.html will be hosted; linked from summary.md")
     s = sub.add_parser("sqlalchemy", help="SQLAlchemy models -> DBML (needs sqlalchemy)")
     s.add_argument("models", metavar="MODULE:BASE")
     s.add_argument("--out", default="-")
@@ -1235,29 +1557,22 @@ def main() -> None:
     d.add_argument("--out", default="-")
     a = ap.parse_args()
 
+    if a.cmd == "doctor":
+        raise SystemExit(doctor())
+    if a.cmd == "open":
+        if not Path(a.file).exists():
+            raise SystemExit(f"{a.file} not found.")
+        serve(_View(a.file, bool(a.rev_from or a.rev_to), a.rev_from, a.rev_to, a.rename, a.notes, a.title), a.port, not a.no_open)
+        return
+    if a.cmd == "publish":
+        publish(a)
+        return
     if a.cmd == "diff":
-        if a.file:
-            if not a.rev_from or a.old or a.new:
-                raise SystemExit("With --file, give --from REV (and optionally --to REV), and no positional files.")
-            old_x = git_text(a.rev_from, a.file)
-            new_x = git_text(a.rev_to, a.file) if a.rev_to else Path(a.file).read_text()
-            lo, ln = a.old_label or _short_rev(a.rev_from), a.new_label or (_short_rev(a.rev_to) if a.rev_to else "working tree")
-            names = (a.file, a.file)
-        else:
-            if not (a.old and a.new):
-                raise SystemExit("Give two files, or --file F --from REV [--to REV].")
-            lo, ln = a.old_label or Path(a.old).name, a.new_label or Path(a.new).name
-            old_x, new_x, names = Path(a.old).read_text(), Path(a.new).read_text(), (a.old, a.new)
-        old_t, new_t = parse_text(old_x, names[0]), parse_text(new_x, names[1])
-        so, sn = header_source(old_x), header_source(new_x)
-        if so and sn and so != sn:
-            print(f"warning: the two files were generated from different sources ({so} vs {sn}); type spellings and "
-                  "constraints can differ for that reason alone, so some changes below may not be real.", file=sys.stderr)
-        tables, stats = diff_tables(old_t, new_t, a.rename, a.notes)
-        for h in rename_hints(old_t, new_t, a.rename):
-            print(f"hint: possible rename: {h}. Check git, then pass --rename.", file=sys.stderr)
-        info = dict(stats, old=lo, new=ln)
-        Path(a.out).write_text(to_html(tables, a.title or f"{lo} to {ln}", f"{lo} and {ln}", info))
+        old_x, new_x, names, lo, ln = _diff_inputs(a)
+        html, stats, tables = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title)
+        Path(a.out).write_text(html, encoding="utf-8")
+        if a.md:
+            Path(a.md).write_text(diff_markdown(tables, stats, lo, ln), encoding="utf-8")
         print(f"{a.out}: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items() if v) if any(stats.values())
               else f"{a.out}: no differences between {lo} and {ln}")
     elif a.cmd == "render":
@@ -1266,7 +1581,7 @@ def main() -> None:
         if a.expect is not None and len(tables) != a.expect:
             raise SystemExit(f"Expected {a.expect} tables but {path.name} has {len(tables)}.")
         _warn_missing_fks(tables)
-        Path(a.out).write_text(to_html(tables, a.title or path.stem.replace("_", " ").replace("-", " ").title(), path.name))
+        Path(a.out).write_text(to_html(tables, a.title or path.stem.replace("_", " ").replace("-", " ").title(), path.name), encoding="utf-8")
         ncols = sum(len(t["cols"]) for t in tables)
         nfks = sum("fk" in c for t in tables for c in t["cols"])
         print(f"{a.out}: {len(tables)} tables, {ncols} columns, {nfks} foreign keys from {path.name}")
@@ -1278,7 +1593,7 @@ def main() -> None:
         if a.out == "-":
             sys.stdout.write(dbml)
         else:
-            Path(a.out).write_text(dbml)
+            Path(a.out).write_text(dbml, encoding="utf-8")
             print(f"{a.out}: DBML ({len(re.findall(r'(?m)^Table ', dbml))} tables)")
 
 

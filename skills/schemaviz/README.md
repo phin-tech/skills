@@ -1,83 +1,99 @@
 # schemaviz
 
-Draw a database schema as one interactive HTML page, from any ORM.
+Draw a database schema as one interactive page, and see what a migration changed. A command-line tool plus a skill that
+teaches an agent to drive it.
 
-The renderer reads only [DBML](https://dbml.dbdiagram.io). The agent's job is to read your models or migrations
-(Django, Rails, Prisma, TypeORM, SQLAlchemy, Ecto, ...) and write the DBML; `schemaviz.py` draws it. That keeps the
-drawing deterministic and lets one tool cover every framework.
+The renderer reads only [DBML](https://dbml.dbdiagram.io), so one tool covers every framework. Exporters write DBML for
+SQLAlchemy, Django, SQL dumps, dbt projects and live databases; for anything else the agent reads the code and writes it.
 
-## What you get
+## Install
 
-A single `.html` file with four tabs:
+Pick one. All give you a `schemaviz` command; check with `schemaviz doctor`.
 
-| Tab | What it is |
+```bash
+uv tool install git+https://github.com/phin-tech/skills#subdirectory=skills/schemaviz   # or pipx; needs Python 3.9+
+curl -fsSL https://raw.githubusercontent.com/phin-tech/skills/main/skills/schemaviz/install.sh | sh   # a binary, no Python (once a release is tagged)
+python3 skills/schemaviz/schemaviz.py <command>                                          # no install: standard library only
+```
+
+The skill (`SKILL.md`) tells the agent to use `schemaviz` when it is on the PATH and the script beside it when not:
+
+```bash
+npx skills add phin-tech/skills --skill schemaviz     # or copy this folder into ~/.claude/skills/
+```
+
+## Commands
+
+| Command | What it does |
 |---|---|
-| Tables | Every table as a card, grouped into sections, with column types, keys and descriptions. |
-| Relationships | A column-per-section map of foreign keys. Click a table to see what it points at and what points at it. |
-| Explore | Start from one table. Click a foreign key to open the table it points at on the left; click "Pointed at by" to open children on the right. Drag tables to arrange them. |
-| Overview | The whole schema on a zoomable, pannable canvas, placed by a force-directed layout. Click a key to jump to its table. |
+| `schemaviz render schema.dbml --out schema.html` | One self-contained HTML page. `--expect N` fails if the table count is not N. |
+| `schemaviz open schema.dbml` | Serve it locally and open the browser; the page reloads when the file changes. |
+| `schemaviz open schema.dbml --from v1.4 --to HEAD` | The same for what changed between two revisions, with a revision picker in the page. |
+| `schemaviz diff old.dbml new.dbml` | The changes between two files as a page. `--md summary.md` also writes a pull request summary. |
+| `schemaviz diff --file docs/schema.dbml --from v1.4 --to HEAD` | The changes between two revisions of a tracked file. |
+| `schemaviz publish ... --out-dir site` | A static folder for another tool to upload (see below). |
+| `schemaviz sqlalchemy`, `django`, `db`, `sql`, `dbt` | Write DBML from models, a SQL dump, dbt artifacts or a live database. |
+| `schemaviz doctor` | What works on this machine. |
 
-Table and column `Note`s in the DBML become the descriptions. A `TableGroup` becomes a coloured section. A table that
-most others point at (a tenant or account root) is drawn as a bar so its links don't bury the rest.
+### The page
 
-## Use
+Four tabs: **Tables** (cards, grouped, with types, keys and descriptions), **Relationships** (a map of foreign keys),
+**Explore** (click a foreign key to open the table it points at) and **Overview** (everything on a zoomable canvas).
+`Note`s become descriptions and a `TableGroup` becomes a coloured section.
 
-Ask your agent: *"diagram the database"*. It reads the code, writes `schema.dbml`, and runs:
-
-```bash
-python3 skills/schemaviz/schemaviz.py render schema.dbml --out schema.html --title "My app"
-```
-
-`render` needs only Python 3. Open `schema.html` in a browser. It also accepts a `.json` file; see `SKILL.md`.
-
-## Optional exporters
-
-If the project is SQLAlchemy or Django, or you have a database to point at, the script can write the DBML itself (these need
-`pip install sqlalchemy` or `django`, and for `db` a driver such as `asyncpg` or `psycopg`):
+### Exporters
 
 ```bash
-python3 schemaviz.py sqlalchemy app.models:Base --out schema.dbml   # reads comment= and info={"group": ...}
-python3 schemaviz.py django mysite.settings --out schema.dbml   # reads help_text; app label becomes the section
-python3 schemaviz.py db postgresql+asyncpg://user:pw@host/db --out schema.dbml   # reads COMMENT ON
+schemaviz sql schema.sql --dialect postgresql --out schema.dbml   # pg_dump --schema-only, structure.sql, sqlite .schema, prisma migrate diff --script
+schemaviz dbt target/manifest.json --out schema.dbml              # catalog.json beside it gives real column types
+schemaviz sqlalchemy app.models:Base --out schema.dbml            # needs sqlalchemy
+schemaviz django mysite.settings --out schema.dbml                # needs django, run in the project's environment
+schemaviz db postgresql+asyncpg://user:pw@host/db --out schema.dbml
 ```
 
-These two need nothing installed:
-
-```bash
-python3 schemaviz.py sql schema.sql --dialect postgresql --out schema.dbml   # pg_dump --schema-only, structure.sql, prisma migrate diff --script
-python3 schemaviz.py dbt target/manifest.json --out schema.dbml              # catalog.json beside it gives real types
-```
-
-The DBML header records the command and source (`// Source: database postgresql`). `diff` warns when its two files came
+The DBML header records the command and source (`// Source: database postgresql`); `diff` warns when its two files came
 from different sources, because type spellings and constraints can differ for that reason alone.
 
-Other tools that emit DBML work too: `prisma-dbml-generator`, `drizzle-dbml-generator`, `@dbml/cli`
-(`db2dbml`, `sql2dbml`). Check their output against the code.
+### What changed
 
-## Seeing what a migration changed
+Keep the generated DBML in git and compare any two revisions: new tables and columns are green, changed ones amber with
+what they were, removed ones red and struck through. A banner counts them. A rename looks like a removal plus an
+addition until you confirm it with `--rename old=new` or `--rename table.old=new`; the diff prints hints for likely ones.
+Type respellings (`int` / `integer`) and reworded notes are not reported as changes.
 
-Keep the generated DBML in git, then compare any two revisions of it:
+### Publishing
+
+`publish` only generates files; uploading is your own tool's job. Compare against the **merge base**, not the tip of
+`origin/main`: otherwise tables main added after your branch started show up as dropped. In CI the checkout needs
+`fetch-depth: 0` (or at least the base branch fetched).
 
 ```bash
-python3 schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD --out changes.html
-python3 schemaviz.py diff old.dbml new.dbml        # or two files
+schemaviz publish --file docs/schema.dbml --from "$(git merge-base origin/main HEAD)" --to HEAD --out-dir site --url https://example.com/pr-12/
+aws s3 sync site/ s3://my-bucket/pr-12/        # or gsutil, gh, a Pages deploy: whatever you already use
 ```
 
-New tables and columns are green, changed ones amber with what they were, removed ones red and struck through, with a
-count banner and an "only changed tables" filter. Renames are shown when confirmed with `--rename old=new` / `--rename table.old=new` (the diff prints hints for likely ones). See SKILL.md section 4.
+`site/` holds `index.html` (self-contained; open it anywhere), `summary.md` (paste or post it as a PR comment: counts,
+a table of column changes per table, and a Mermaid diagram that GitHub renders), `schema.dbml`, and `manifest.json`
+(the file list, sizes, content types and change counts, for an uploader to read). `summary.md` starts with
+`<!-- schemaviz -->` so a CI job can find and update its own comment.
+
+## Development
+
+```bash
+python3 -m unittest discover -s tests      # standard library only; 27 tests
+```
+
+Release: bump `__version__` in `schemaviz.py`, then push a tag `schemaviz-v<version>`. `.github/workflows/schemaviz-release.yml`
+builds one binary per platform with PyInstaller, smoke-tests each, and attaches them with `SHA256SUMS`;
+`install.sh` verifies the checksum before installing. Those workflows have not run yet.
 
 ## Files
 
 | File | Purpose |
 |---|---|
-| `SKILL.md` | The instructions the agent follows: how to get from code to DBML, and what to carry over. |
-| `schemaviz.py` | The renderer and the optional exporters. |
-| `template.html` | The page the renderer fills in. Keep it next to the script. |
-
-## Install
-
-```bash
-npx skills add phin-tech/skills --skill schemaviz
-```
-
-or copy this folder into `~/.claude/skills/`.
+| `SKILL.md` | What the agent follows: use the command, get from code to DBML, what to carry over. |
+| `schemaviz.py` | The command: renderer, differ, exporters, local server. Standard library only. |
+| `template.html` | The page the renderer fills in. Keep it next to the script (an install puts it in `share/schemaviz`). |
+| `pyproject.toml` | Makes `uv tool install` / `pipx install` give a `schemaviz` command. |
+| `install.sh` | Installs a release binary and verifies its checksum. |
+| `tests/` | Unit tests. |

@@ -131,6 +131,10 @@
   .diffbar { margin-top: 14px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 13px; }
   .diffbar[hidden], .grid[hidden], h2[hidden], .card[hidden] { display: none; }
   .diffbar label { margin-left: auto; cursor: pointer; }
+  .picker { gap: 8px 12px; margin-bottom: 0; }
+  .picker label { margin-left: 0; color: var(--muted); }
+  .picker select { font: 13px var(--ui); color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; max-width: min(100%, 42ch); }
+  .picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   .dchip { font: 600 12px var(--mono); padding: 1px 7px; border-radius: 4px; }
   .dchip.added, .dbadge.added { background: var(--add-soft); color: var(--add); }
   .dchip.removed, .dbadge.removed { background: var(--del-soft); color: var(--del); }
@@ -155,6 +159,10 @@
     </div>
     <div class="legend"><span><span class="tag">PK</span> primary key</span><span><span class="tag uq">UQ</span> unique</span><span>grey name = nullable</span></div>
   </header>
+  <div class="diffbar picker" id="picker" hidden>
+    <label for="pfrom">From</label><select id="pfrom"></select>
+    <label for="pto">To</label><select id="pto"></select>
+  </div>
   <div class="diffbar" id="diffbar" hidden></div>
   <div class="tabs" role="tablist">
     <button role="tab" id="tab-tables" aria-selected="true" aria-controls="pane-tables">Tables</button>
@@ -255,6 +263,14 @@ GROUPS.forEach(g => {
     grid.appendChild(card);
   });
 });
+if (DIFF && DIFF.picker) {
+  const P = DIFF.picker, bar = document.getElementById('picker'); bar.hidden = false;
+  const fill = (sel, opts, cur) => { opts.forEach(o => { const e = document.createElement('option'); e.value = o.v; e.textContent = o.label; sel.appendChild(e); }); sel.value = cur; };
+  const pf = document.getElementById('pfrom'), pt = document.getElementById('pto');
+  fill(pf, P.revs, P.from); fill(pt, [{ v: 'WORKTREE', label: 'working tree' }].concat(P.revs), P.to);
+  const go = () => { location.search = '?from=' + encodeURIComponent(pf.value) + '&to=' + encodeURIComponent(pt.value); };
+  pf.onchange = go; pt.onchange = go;
+}
 if (DIFF) {
   document.getElementById('sub').textContent = 'Changes from ' + DIFF.old + ' to ' + DIFF.new + '. Green is new, amber changed, red removed (kept on the page, struck through).';
   const bar = document.getElementById('diffbar'); bar.hidden = false;
@@ -672,7 +688,8 @@ document.getElementById('count').textContent = Object.keys(cards).length + ' tab
 (function () {
   const ids = ['tables', 'map', 'explore', 'overview']; const tabs = {};
   ids.forEach(k => tabs[k] = [document.getElementById('tab-' + k), document.getElementById('pane-' + (k === 'tables' ? 'tables' : k))]);
-  window.showTab = k => { Object.entries(tabs).forEach(([n, [b, p]]) => { b.setAttribute('aria-selected', n === k); p.hidden = n !== k; }); if (k === 'explore') window.exploreRender(); if (k === 'overview') window.overviewShow(); };
+  window.showTab = k => { Object.entries(tabs).forEach(([n, [b, p]]) => { b.setAttribute('aria-selected', n === k); p.hidden = n !== k; }); if (k === 'explore') window.exploreRender(); if (k === 'overview') window.overviewShow();
+    try { history.replaceState(null, '', location.pathname + location.search + '#' + k); } catch (e) {} };
   Object.entries(tabs).forEach(([n, [b]]) => b.onclick = () => window.showTab(n));
   if (tabs[location.hash.slice(1)]) window.showTab(location.hash.slice(1));
 })();

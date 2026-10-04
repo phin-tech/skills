@@ -1,15 +1,36 @@
 ---
 name: schemaviz
-description: Draw a database schema (tables, columns, keys, relationships, descriptions) as an interactive HTML page. Use when asked to diagram, visualise or map a database or its ORM models, in any language or framework. You read the code, write DBML, and the bundled renderer draws it.
+description: Draw a database schema (tables, columns, keys, relationships, descriptions) as an interactive page, and show what a migration changed between two commits. Use when asked to diagram, visualise or map a database, ORM models, a SQL dump or a dbt project, or to see what changed in a schema. Uses the `schemaviz` command, which also has exporters for SQLAlchemy, Django, SQL, dbt and live databases.
 ---
 
 # schemaviz
 
-`schemaviz.py render` turns a DBML file into one self-contained HTML page with four tabs: Tables, Relationships,
-Explore (click a foreign key to open the table it points at) and Overview (every table on a zoomable map, laid out by
-a force simulation). It needs only Python 3 and nothing installed.
+`schemaviz` turns a schema into one interactive page with four tabs: Tables, Relationships, Explore (click a foreign key
+to open the table it points at) and Overview (every table on a zoomable map). It can also compare two versions and mark
+what changed. Your job is the step before it: get the schema into DBML (a plain-text schema format), then run the command.
 
-The script and `template.html` sit next to this file; run the script by its path. Your job is the step before it: get the schema into DBML.
+## The command
+
+Check `command -v schemaviz`. If it is there, use it. If not, either install it or use the copy next to this file; the
+subcommands are identical.
+
+```
+uv tool install git+https://github.com/phin-tech/skills#subdirectory=skills/schemaviz     # or pipx; a binary: see README.md
+python <this-skill-folder>/schemaviz.py <command> ...        # no install; Python 3.9+, standard library only
+schemaviz doctor                                              # what works on this machine
+```
+
+| You want | Run |
+|---|---|
+| The schema as a file to share | `schemaviz render schema.dbml --out schema.html` |
+| The user to explore it now | `schemaviz open schema.dbml` (local server, reloads when the file changes) |
+| What a migration changed | `schemaviz open schema.dbml --from v1.4 --to HEAD` (revision picker in the page) |
+| The same as a file | `schemaviz diff --file schema.dbml --from v1.4 --to HEAD --out changes.html` |
+| Something to attach to a pull request | `schemaviz publish --file schema.dbml --from "$(git merge-base origin/main HEAD)" --to HEAD --out-dir site` (section 5) |
+| DBML from code or a database | `schemaviz sqlalchemy`, `django`, `sql`, `dbt`, `db` (section 1) |
+
+`open` keeps running until stopped. Start it in the background, give the user the address it prints, and stop it when
+they are done. Add `--no-open` when the user is not at this machine.
 
 ## 1. Write the DBML
 
@@ -19,15 +40,15 @@ Use whatever is cheapest and most accurate:
   (Drizzle), `npx @dbml/cli db2dbml postgres <url>` (a live database), `sql2dbml` (a `.sql` dump). Check its output
   against the code before trusting it.
 - **Prisma:** `npx prisma migrate diff --from-empty --to-schema-datamodel schema.prisma --script > schema.sql`, then
-  `python schemaviz.py sql schema.sql --dialect postgresql --out schema.dbml`. It needs no database. Count tables with
+  `schemaviz sql schema.sql --dialect postgresql --out schema.dbml`. It needs no database. Count tables with
   `grep -c '^CREATE TABLE' schema.sql`, not `grep -c '^model '`: an implicit many-to-many relation adds an `_AToB` join
   table with no model. Avoid `prisma-dbml-generator` for diffs: it lists Prisma's relation fields (`user`, `team`) as
   columns, which inflated Documenso from 490 real columns to 616.
 - **Any SQL schema** (a `pg_dump --schema-only`, Rails `structure.sql`, sqlite `.schema`, or any file of `CREATE TABLE`
-  and `ALTER TABLE ... ADD CONSTRAINT` statements): `python schemaviz.py sql schema.sql --dialect postgresql --out schema.dbml`.
+  and `ALTER TABLE ... ADD CONSTRAINT` statements): `schemaviz sql schema.sql --dialect postgresql --out schema.dbml`.
   Standard library only. It reads primary and foreign keys, unique constraints and indexes, and `COMMENT ON`. It does not
   replay a folder of incremental migrations; dump the schema after migrating instead.
-- **dbt:** `python schemaviz.py dbt target/manifest.json --out schema.dbml`. It uses `catalog.json` beside the manifest for
+- **dbt:** `schemaviz dbt target/manifest.json --out schema.dbml`. It uses `catalog.json` beside the manifest for
   the warehouse's real columns and types. Models, seeds and snapshots become tables (ephemeral models are skipped; add
   `--sources` for declared sources). Descriptions become notes, a `relationships` test becomes a foreign key, `unique`
   and `not_null` tests become constraints, and if exactly one column has both it is drawn as the primary key (a dbt convention, not
@@ -36,14 +57,14 @@ Use whatever is cheapest and most accurate:
   worked for five projects), but without a catalog only declared columns appear, with no types.
   `dbt docs generate` makes the catalog and does query the warehouse. On Databricks, prefer the manifest and catalog your CI
   or dbt Cloud job already produced over running dbt yourself. A project with few tests draws few foreign keys.
-- **SQLAlchemy:** `python schemaviz.py sqlalchemy app.models:Base --out schema.dbml` (needs sqlalchemy; run it where the
+- **SQLAlchemy:** `schemaviz sqlalchemy app.models:Base --out schema.dbml` (needs sqlalchemy; run it where the
   app's dependencies are installed). Reads `comment=` as the descriptions and `info={"group": "..."}` on a table as its section.
-- **Django:** `python schemaviz.py django mysite.settings --out schema.dbml` (needs django; run it where the project's
+- **Django:** `schemaviz django mysite.settings --out schema.dbml` (needs django; run it where the project's
   dependencies are installed, from the directory holding `manage.py`). Reads every concrete model through the app
   registry, so abstract bases, multi-table inheritance, auto-created many-to-many tables and `db_table` are handled.
   `help_text` becomes the column note, the model docstring's first line the table note, the app label the section.
   Proxy models are skipped. Check the table count against the tables in a migrated database (`dbshell`, then `\dt`), not against the generator itself.
-- **A live database:** `python schemaviz.py db <sqlalchemy url> --out schema.dbml`. Reads `COMMENT ON` text.
+- **A live database:** `schemaviz db <sqlalchemy url> --out schema.dbml`. Reads `COMMENT ON` text.
   Use the same database engine every time you regenerate a tracked file (sqlite and Postgres differ on types and
   constraints), and skip migration bookkeeping tables (it does, e.g. `django_migrations`, `_prisma_migrations`).
   Tested on sqlite only, where SQLAlchemy does not report a column's inline `UNIQUE`; for sqlite use
@@ -101,7 +122,7 @@ Strings are single-quoted; `'''triple'''` spans lines. Full syntax: https://dbml
 ## 3. Render
 
 ```
-python schemaviz.py render schema.dbml --out schema.html --title "My app"
+schemaviz render schema.dbml --out schema.html --title "My app"
 ```
 
 It prints how many tables it found: compare that with the number of distinct tables in the code, and add any that are missing.
@@ -110,7 +131,7 @@ Pass `--expect N` to make it fail on a mismatch. Take N from a count that is ind
 that exist in the database (auto many-to-many tables included). It also warns when a `thing_id` column has
 no `ref` although a `thing` table exists, which may mean a missed foreign key (many hits are external IDs, so treat it as a prompt to look). A reference to a table that is not in the file is skipped with a warning on stderr; fix the DBML rather than ignore it.
 
-Open the HTML in a browser. A JSON file works in place of DBML for anything easier to emit that way:
+Open the HTML in a browser, or use `schemaviz open schema.dbml` to serve it. A JSON file works in place of DBML for anything easier to emit that way:
 `{"tables": [{"name": "users", "comment": "...", "group": "...", "cols": [{"n": "id", "t": "int", "pk": true}, {"n": "org_id", "fk": "orgs.id"}]}]}`.
 
 ## 4. Track the schema and see what a migration changed
@@ -119,9 +140,9 @@ Commit the DBML next to the code (for example `docs/schema.dbml`) and regenerate
 change. Then any two points in history can be compared without checking anything out or installing the app:
 
 ```
-python schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD --out changes.html   # tag/commit/branch
-python schemaviz.py diff --file docs/schema.dbml --from HEAD --out changes.html            # HEAD vs working tree
-python schemaviz.py diff old.dbml new.dbml --old-label before --new-label after            # two plain files
+schemaviz diff --file docs/schema.dbml --from v1.4 --to HEAD --out changes.html   # tag/commit/branch
+schemaviz diff --file docs/schema.dbml --from HEAD --out changes.html            # HEAD vs working tree
+schemaviz diff old.dbml new.dbml --old-label before --new-label after            # two plain files
 ```
 
 The page is the normal four tabs with the changes marked in place: green `+` added, amber `~` changed (with a "was"
@@ -137,7 +158,7 @@ revisions: the migrations (Django `RenameModel`/`RenameField`, Rails `rename_tab
 files. Pass only confirmed renames, then rerun:
 
 ```
-python schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD \
+schemaviz diff --file docs/schema.dbml --from v1.4 --to HEAD \
   --rename users=accounts --rename accounts.created_at=joined_at
 ```
 
@@ -148,6 +169,16 @@ other change, and a foreign key that only follows a renamed table is not reporte
 seconds (3.5 MB page), but the Overview tab's force layout takes about 50 seconds, freezes the page, and is unreadable at
 that scale. There is no filter flag yet, so for a very large project render a DBML you have trimmed to one area
 (`grep`/script the tables you want) and tell the user the diagram is partial.
+
+## 5. Share it
+
+HTML does not render in a pull request, so `schemaviz publish` writes a folder: `index.html` (self-contained, for a
+bucket, Pages or a CI artifact), `summary.md` (counts, a table of column changes per table, and a Mermaid diagram,
+which GitHub renders) and `manifest.json` (file list and change counts). It does not upload anything; hand `site/` to the
+tool the project already uses (`aws s3 sync`, `gsutil`, `gh pr comment --body-file site/summary.md`). Post to a pull
+request only when the user asks. `--url` puts the hosted address in the summary. Always start the comparison at the
+merge base (`git merge-base origin/main HEAD`), not at `origin/main`, or tables main gained since the branch started look
+dropped; CI needs `fetch-depth: 0` for that.
 
 ## What the renderer decides for you
 
