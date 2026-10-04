@@ -59,7 +59,11 @@ Use whatever is cheapest and most accurate:
   means the committed DBML is probably stale. Regenerate it rather than trusting that diff. Folders become sections. If you do not have the artifacts, `dbt parse` writes the manifest
   without querying the warehouse (needs dbt-core, an adapter, and a `profiles.yml`; a throwaway DuckDB profile
   worked for five projects), but without a catalog only declared columns appear, with no types.
-  `dbt docs generate` makes the catalog and does query the warehouse. On Databricks, prefer the manifest and catalog your CI
+  For a Databricks (or any warehouse-specific) project, parse with the project's own adapter and a dummy profile
+(`host: dummy.cloud.databricks.com`, `http_path: /sql/1.0/warehouses/dummy`, `token: dapi-dummy`): in a test of three
+Databricks projects `dbt parse` finished in 2 to 4 seconds under `dbt-databricks` without opening a connection, and a
+DuckDB profile also parsed them (same nodes, columns and tests; only the adapter's own macros differ). Tested with
+dbt-core 1.12 only. `dbt docs generate` makes the catalog and does query the warehouse. On Databricks, prefer the manifest and catalog your CI
   or dbt Cloud job already produced over running dbt yourself. A project with few tests draws few foreign keys.
 - **SQLAlchemy:** `schemaviz sqlalchemy app.models:Base --out schema.dbml` (needs sqlalchemy; run it where the
   app's dependencies are installed). Reads `comment=` as the descriptions and `info={"group": "..."}` on a table as its section.
