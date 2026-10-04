@@ -11,8 +11,9 @@ SQLAlchemy, Django, SQL dumps, dbt projects and live databases; for anything els
 Pick one. All give you a `schemaviz` command; check with `schemaviz doctor`.
 
 ```bash
+brew install phin-tech/tap/schemaviz                                                      # a binary, no Python
+curl -fsSL https://raw.githubusercontent.com/phin-tech/skills/main/skills/schemaviz/install.sh | sh   # the same binary, checksum-verified
 uv tool install git+https://github.com/phin-tech/skills#subdirectory=skills/schemaviz   # or pipx; needs Python 3.9+
-curl -fsSL https://raw.githubusercontent.com/phin-tech/skills/main/skills/schemaviz/install.sh | sh   # a binary, no Python (once a release is tagged)
 python3 skills/schemaviz/schemaviz.py <command>                                          # no install: standard library only
 ```
 
@@ -83,9 +84,16 @@ a table of column changes per table, and a Mermaid diagram that GitHub renders),
 python3 -m unittest discover -s tests      # standard library only; 27 tests
 ```
 
-Release: bump `__version__` in `schemaviz.py`, then push a tag `schemaviz-v<version>`. `.github/workflows/schemaviz-release.yml`
-builds one binary per platform with PyInstaller, smoke-tests each, and attaches them with `SHA256SUMS`;
-`install.sh` verifies the checksum before installing. Those workflows have not run yet.
+Release: bump `__version__` in `schemaviz.py`, push, then push a tag `schemaviz-v<version>` that matches it.
+`.github/workflows/schemaviz-release.yml` builds one binary per platform with PyInstaller (macOS arm64 and Intel, Linux
+x64 and arm64, Windows), smoke-tests each, and attaches them with `SHA256SUMS`; `install.sh` verifies the checksum.
+Then update the Homebrew tap:
+
+```bash
+python3 scripts/homebrew-formula.py 0.1.0 > ../homebrew-tap/Formula/schemaviz.rb   # reads the release's SHA256SUMS
+```
+
+0.1.0 was released and installed through all three routes above (Windows binary built, not run).
 
 ## Files
 
@@ -96,4 +104,5 @@ builds one binary per platform with PyInstaller, smoke-tests each, and attaches 
 | `template.html` | The page the renderer fills in. Keep it next to the script (an install puts it in `share/schemaviz`). |
 | `pyproject.toml` | Makes `uv tool install` / `pipx install` give a `schemaviz` command. |
 | `install.sh` | Installs a release binary and verifies its checksum. |
+| `scripts/homebrew-formula.py` | Writes the Homebrew formula for a release. |
 | `tests/` | Unit tests. |

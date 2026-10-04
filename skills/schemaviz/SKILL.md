@@ -15,7 +15,8 @@ Check `command -v schemaviz`. If it is there, use it. If not, either install it 
 subcommands are identical.
 
 ```
-uv tool install git+https://github.com/phin-tech/skills#subdirectory=skills/schemaviz     # or pipx; a binary: see README.md
+brew install phin-tech/tap/schemaviz                                                        # a binary, no Python
+uv tool install git+https://github.com/phin-tech/skills#subdirectory=skills/schemaviz     # or pipx; more options: README.md
 python <this-skill-folder>/schemaviz.py <command> ...        # no install; Python 3.9+, standard library only
 schemaviz doctor                                              # what works on this machine
 ```
