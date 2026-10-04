@@ -52,8 +52,10 @@ schemaviz django mysite.settings --out schema.dbml                # needs django
 schemaviz db postgresql+asyncpg://user:pw@host/db --out schema.dbml
 ```
 
-The DBML header records the command and source (`// Source: database postgresql`); `diff` warns when its two files came
-from different sources, because type spellings and constraints can differ for that reason alone.
+The DBML header records the command, the source (`// Source: database postgresql`) and, for dbt, the tool version and
+when the manifest was generated. `diff` warns when its two files came from different sources or tool versions (type
+spellings and constraints can differ for that reason alone), and when a file was generated 7+ days before the commit
+that holds it (it is probably stale). The warnings appear on stderr, in the page banner and in `summary.md`.
 
 ### What changed
 
@@ -81,7 +83,7 @@ a table of column changes per table, and a Mermaid diagram that GitHub renders),
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests      # standard library only; 27 tests
+python3 -m unittest discover -s tests      # standard library only; 32 tests
 ```
 
 Release: bump `__version__` in `schemaviz.py`, push, then push a tag `schemaviz-v<version>` that matches it.

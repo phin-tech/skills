@@ -135,6 +135,7 @@
   .picker label { margin-left: 0; color: var(--muted); }
   .picker select { font: 13px var(--ui); color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; max-width: min(100%, 42ch); }
   .picker select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .dwarn { flex-basis: 100%; color: var(--chg); font-size: 12px; }
   .dchip { font: 600 12px var(--mono); padding: 1px 7px; border-radius: 4px; }
   .dchip.added, .dbadge.added { background: var(--add-soft); color: var(--add); }
   .dchip.removed, .dbadge.removed { background: var(--del-soft); color: var(--del); }
@@ -279,6 +280,7 @@ if (DIFF) {
   const col = [chip(DIFF.cols_added, 'added', 'columns added'), chip(DIFF.cols_removed, 'removed', 'columns removed'), chip(DIFF.cols_changed, 'changed', 'columns changed')];
   const any = tbl.concat(col).some(Boolean);
   bar.append(...tbl.concat(col).filter(Boolean));
+  (DIFF.warnings || []).forEach(w => bar.appendChild(el('div', 'dwarn', 'Note: ' + w)));
   if (!any) bar.append('No differences.');
   else {
     const lab = el('label'); const cb = document.createElement('input'); cb.type = 'checkbox'; lab.append(cb, ' Only show changed tables');

@@ -53,7 +53,10 @@ Use whatever is cheapest and most accurate:
   the warehouse's real columns and types. Models, seeds and snapshots become tables (ephemeral models are skipped; add
   `--sources` for declared sources). Descriptions become notes, a `relationships` test becomes a foreign key, `unique`
   and `not_null` tests become constraints, and if exactly one column has both it is drawn as the primary key (a dbt convention, not
-  something dbt declares; several candidates are left as unique). Contract `foreign_key` constraints are read too. Folders become sections. If you do not have the artifacts, `dbt parse` writes the manifest
+  something dbt declares; several candidates are left as unique). Contract `foreign_key` constraints are read too.
+  The DBML header records the dbt version and when the manifest was generated; `diff` warns when the two sides used
+  different dbt versions, or when a side was generated much earlier (7+ days) than the commit that holds it, which
+  means the committed DBML is probably stale. Regenerate it rather than trusting that diff. Folders become sections. If you do not have the artifacts, `dbt parse` writes the manifest
   without querying the warehouse (needs dbt-core, an adapter, and a `profiles.yml`; a throwaway DuckDB profile
   worked for five projects), but without a catalog only declared columns appear, with no types.
   `dbt docs generate` makes the catalog and does query the warehouse. On Databricks, prefer the manifest and catalog your CI

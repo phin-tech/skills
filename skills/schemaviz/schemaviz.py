@@ -477,18 +477,78 @@ def _diff_inputs(a) -> tuple:
     return Path(a.old).read_text(encoding="utf-8"), Path(a.new).read_text(encoding="utf-8"), (a.old, a.new), a.old_label or Path(a.old).name, a.new_label or Path(a.new).name
 
 
-def diff_page(old_x: str, new_x: str, names: tuple, lo: str, ln: str, renames=None, notes=False, title=None, picker=None) -> tuple[str, dict, list]:
+def diff_page(old_x: str, new_x: str, names: tuple, lo: str, ln: str, renames=None, notes=False, title=None, picker=None,
+              when=(None, None)) -> tuple[str, dict, list, list]:
     """The HTML for the changes between two DBML/JSON texts, and the counts."""
     old_t, new_t = parse_text(old_x, names[0]), parse_text(new_x, names[1])
-    so, sn = header_source(old_x), header_source(new_x)
-    if so and sn and so != sn:
-        print(f"warning: the two files were generated from different sources ({so} vs {sn}); type spellings and "
-              "constraints can differ for that reason alone, so some changes below may not be real.", file=sys.stderr)
+    warnings = provenance_warnings(old_x, new_x, *when)
+    for w in warnings:
+        print("warning: " + w, file=sys.stderr)
     tables, stats = diff_tables(old_t, new_t, renames, notes)
     for h in rename_hints(old_t, new_t, renames):
         print(f"hint: possible rename: {h}. Check git, then pass --rename.", file=sys.stderr)
-    info = dict(stats, old=lo, new=ln, picker=picker)
-    return to_html(tables, title or f"{lo} to {ln}", f"{lo} and {ln}", info), stats, tables
+    info = dict(stats, old=lo, new=ln, picker=picker, warnings=warnings)
+    return to_html(tables, title or f"{lo} to {ln}", f"{lo} and {ln}", info), stats, tables, warnings
+
+
+def _when(a) -> tuple:
+    """Commit dates for the two sides when comparing revisions of a tracked file; (None, None) for two plain files."""
+    if not a.file:
+        return (None, None)
+    return rev_time(a.rev_from, a.file), rev_time(a.rev_to or "WORKTREE", a.file)
+
+
+def _parse_ts(s: str):
+    """An ISO timestamp (dbt writes e.g. 2026-10-04T14:02:11.123456Z) as an aware datetime, or None."""
+    from datetime import datetime, timezone
+
+    s = re.sub(r"(\.\d{6})\d+", r"\1", (s or "").strip().replace("Z", "+00:00"))
+    try:
+        d = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+def header_meta(text: str) -> dict:
+    """What an exporter wrote at the top of a DBML file: source, source-version, source-generated."""
+    out = {}
+    for key in ("Source", "Source-version", "Source-generated"):
+        m = re.search(rf"(?m)^// {key}: (.+)$", text)
+        out[key.lower().replace("-", "_")] = m.group(1).strip() if m else ""
+    return out
+
+
+def rev_time(rev: str, file: str):
+    """(when, allowed age in days) for the side of a diff at `rev`: a commit's date, or now for the working tree."""
+    import subprocess
+    from datetime import datetime, timezone
+
+    if rev == "WORKTREE":
+        return datetime.now(timezone.utc), 30
+    path = Path(file).resolve()
+    r = subprocess.run(["git", "log", "-1", "--format=%cI", _check_rev(rev)], capture_output=True, encoding="utf-8", errors="replace", cwd=path.parent)
+    d = _parse_ts(r.stdout) if r.returncode == 0 else None
+    return (d, 7) if d else None
+
+
+def provenance_warnings(old_x: str, new_x: str, old_when=None, new_when=None) -> list[str]:
+    """Reasons to doubt that a diff compares like with like: made by different tools, or generated long before the commit
+    that holds it (so the schema may have moved on since)."""
+    mo, mn = header_meta(old_x), header_meta(new_x)
+    out = []
+    if mo["source"] and mn["source"] and mo["source"] != mn["source"]:
+        out.append(f"the two files were generated from different sources ({mo['source']} vs {mn['source']}); type spellings and "
+                   "constraints can differ for that reason alone, so some changes below may not be real.")
+    if mo["source_version"] and mn["source_version"] and mo["source_version"] != mn["source_version"]:
+        out.append(f"the two files were generated with different tool versions ({mo['source_version']} vs {mn['source_version']}); "
+                   "some changes below may come from the tool, not the schema.")
+    for label, m, when in (("old", mo, old_when), ("new", mn, new_when)):
+        g = _parse_ts(m["source_generated"])
+        if g and when and when[0] and (when[0] - g).days > when[1]:
+            out.append(f"the {label} file says it was generated {(when[0] - g).days} days before the version it is compared as "
+                       f"({m['source_generated']}), so it may be out of date. Regenerate it.")
+    return out
 
 
 def header_source(text: str) -> str:
@@ -667,11 +727,15 @@ def rename_hints(old: list[dict], new: list[dict], renames: list[str] | None = N
 # ---- DBML writer, for the exporters below -----------------------------------------------------------------------
 
 
-def to_dbml(tables: list[dict], command: str = "", source: str = "") -> str:
+def to_dbml(tables: list[dict], command: str = "", source: str = "", version: str = "", generated: str = "") -> str:
     q = lambda s: "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ") + "'"
     out = ["// Generated by: schemaviz.py " + command if command else "// Generated by schemaviz.py"]
     if source:
         out.append("// Source: " + source)
+    if version:
+        out.append("// Source-version: " + version)
+    if generated:
+        out.append("// Source-generated: " + generated)
     out.append("// Paste into https://dbdiagram.io/d\n")
     tables = sorted(tables, key=lambda t: t["name"])
     for t in tables:
@@ -1213,7 +1277,9 @@ def export_dbt(manifest_path: str, catalog_path: str | None, with_sources: bool)
     adapter = (manifest.get("metadata") or {}).get("adapter_type") or "unknown adapter"
     typed = "with warehouse types" if catalog else "no catalog: types only where declared"
     print(f"dbt: {len(tables)} tables, {typed}", file=sys.stderr)
-    return to_dbml(tables, f"dbt {mp.name}", f"dbt {adapter}" + ("" if catalog else " (no catalog)"))
+    meta = manifest.get("metadata") or {}
+    return to_dbml(tables, f"dbt {mp.name}", f"dbt {adapter}" + ("" if catalog else " (no catalog)"),
+                   f"dbt-core {meta['dbt_version']}" if meta.get("dbt_version") else "", meta.get("generated_at") or "")
 
 
 def export_database(url: str) -> str:
@@ -1304,7 +1370,7 @@ def _mermaid(tables: list[dict], limit: int = 18) -> str:
     return "\n".join(out)
 
 
-def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = "", limit: int = 60000) -> str:
+def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = "", limit: int = 60000, warnings=None) -> str:
     """The schema changes as Markdown for a pull request comment (GitHub allows 65,536 characters). Built from whole blocks,
     so staying under `limit` never leaves a <details> or a code fence open."""
     n = lambda k, w: f"{stats[k]} {w}" if stats.get(k) else ""  # noqa: E731
@@ -1316,6 +1382,8 @@ def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = 
     head.append(f"**Tables:** {', '.join(bits)}. **Columns:** {', '.join(cols) or 'none changed'}." +
                 (f" [Open the interactive view]({url})." if url else ""))
     blocks = ["\n".join(head)]
+    if warnings:
+        blocks.append("\n".join(f"> **Note:** {w}" for w in warnings))
     for kind, title, sign in (("added", "New tables", "+"), ("removed", "Dropped tables", "\u2212")):
         group = [t for t in tables if t.get("diff") == kind]
         if group:
@@ -1355,10 +1423,10 @@ def publish(a) -> None:
     """Write a static folder: index.html (open it anywhere), summary.md (paste into a PR), schema.dbml and manifest.json.
     Uploading is left to whatever tool you already use (aws s3 cp, gsutil, gh, a Pages deploy)."""
     old_x, new_x, names, lo, ln = _diff_inputs(a)
-    html, stats, tables = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title)
+    html, stats, tables, warnings = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title, when=_when(a))
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    files = {"index.html": html, "summary.md": diff_markdown(tables, stats, lo, ln, a.url or ""), "schema.dbml": new_x}
+    files = {"index.html": html, "summary.md": diff_markdown(tables, stats, lo, ln, a.url or "", warnings=warnings), "schema.dbml": new_x}
     for name, text in files.items():
         (out / name).write_text(text, encoding="utf-8")
     manifest = {"schemaviz": __version__, "old": lo, "new": ln, "changes": stats, "has_changes": any(stats.values()),
@@ -1401,9 +1469,9 @@ class _View:
         for r in (a, b):
             if r != "WORKTREE" and all(x["v"] != r for x in revs):
                 revs.append({"v": r, "label": r})
-        html, _, _ = diff_page(inp["old_x"], inp["new_x"], (self.file, self.file), _short_rev(a),
-                               "working tree" if b == "WORKTREE" else _short_rev(b), self.renames, self.notes, self.title,
-                               {"revs": revs, "from": a, "to": b})
+        html, _, _, _ = diff_page(inp["old_x"], inp["new_x"], (self.file, self.file), _short_rev(a),
+                                  "working tree" if b == "WORKTREE" else _short_rev(b), self.renames, self.notes, self.title,
+                                  {"revs": revs, "from": a, "to": b}, (rev_time(a, self.file), rev_time(b, self.file)))
         return html
 
 
@@ -1569,10 +1637,10 @@ def main() -> None:
         return
     if a.cmd == "diff":
         old_x, new_x, names, lo, ln = _diff_inputs(a)
-        html, stats, tables = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title)
+        html, stats, tables, warnings = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title, when=_when(a))
         Path(a.out).write_text(html, encoding="utf-8")
         if a.md:
-            Path(a.md).write_text(diff_markdown(tables, stats, lo, ln), encoding="utf-8")
+            Path(a.md).write_text(diff_markdown(tables, stats, lo, ln, warnings=warnings), encoding="utf-8")
         print(f"{a.out}: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items() if v) if any(stats.values())
               else f"{a.out}: no differences between {lo} and {ln}")
     elif a.cmd == "render":
