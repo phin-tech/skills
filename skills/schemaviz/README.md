@@ -41,6 +41,16 @@ python3 schemaviz.py django mysite.settings --out schema.dbml   # reads help_tex
 python3 schemaviz.py db postgresql+asyncpg://user:pw@host/db --out schema.dbml   # reads COMMENT ON
 ```
 
+These two need nothing installed:
+
+```bash
+python3 schemaviz.py sql schema.sql --dialect postgresql --out schema.dbml   # pg_dump --schema-only, structure.sql, prisma migrate diff --script
+python3 schemaviz.py dbt target/manifest.json --out schema.dbml              # catalog.json beside it gives real types
+```
+
+The DBML header records the command and source (`// Source: database postgresql`). `diff` warns when its two files came
+from different sources, because type spellings and constraints can differ for that reason alone.
+
 Other tools that emit DBML work too: `prisma-dbml-generator`, `drizzle-dbml-generator`, `@dbml/cli`
 (`db2dbml`, `sql2dbml`). Check their output against the code.
 

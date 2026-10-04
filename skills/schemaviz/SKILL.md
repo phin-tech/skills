@@ -18,12 +18,24 @@ Use whatever is cheapest and most accurate:
 - **A generator that already exists**, if the project has one: `prisma-dbml-generator` (Prisma), `drizzle-dbml-generator`
   (Drizzle), `npx @dbml/cli db2dbml postgres <url>` (a live database), `sql2dbml` (a `.sql` dump). Check its output
   against the code before trusting it.
-- **Prisma:** no database needed. In a scratch directory: `npm i prisma@6 prisma-dbml-generator` (tested with Prisma 6;
-  not tried with 7), copy `schema.prisma`, add `generator dbml { provider = "prisma-dbml-generator" }` to the **copy**,
-  delete its other generators (they need packages you don't have), set dummy values for any `env()` URLs, then
-  `npx prisma generate`. Expect noise: `/// @zod...` and `/// [Type]` doc comments become notes and should be dropped,
-  `Enum` blocks are ignored by the renderer (enum columns just show the enum name), and `@@map` names are only kept if
-  the generator emits them, so compare table names with the `@@map` values. Use `--expect $(grep -c '^model ' schema.prisma)`.
+- **Prisma:** `npx prisma migrate diff --from-empty --to-schema-datamodel schema.prisma --script > schema.sql`, then
+  `python schemaviz.py sql schema.sql --dialect postgresql --out schema.dbml`. It needs no database. Count tables with
+  `grep -c '^CREATE TABLE' schema.sql`, not `grep -c '^model '`: an implicit many-to-many relation adds an `_AToB` join
+  table with no model. Avoid `prisma-dbml-generator` for diffs: it lists Prisma's relation fields (`user`, `team`) as
+  columns, which inflated Documenso from 490 real columns to 616.
+- **Any SQL schema** (a `pg_dump --schema-only`, Rails `structure.sql`, sqlite `.schema`, or any file of `CREATE TABLE`
+  and `ALTER TABLE ... ADD CONSTRAINT` statements): `python schemaviz.py sql schema.sql --dialect postgresql --out schema.dbml`.
+  Standard library only. It reads primary and foreign keys, unique constraints and indexes, and `COMMENT ON`. It does not
+  replay a folder of incremental migrations; dump the schema after migrating instead.
+- **dbt:** `python schemaviz.py dbt target/manifest.json --out schema.dbml`. It uses `catalog.json` beside the manifest for
+  the warehouse's real columns and types. Models, seeds and snapshots become tables (ephemeral models are skipped; add
+  `--sources` for declared sources). Descriptions become notes, a `relationships` test becomes a foreign key, `unique`
+  and `not_null` tests become constraints, and if exactly one column has both it is drawn as the primary key (a dbt convention, not
+  something dbt declares; several candidates are left as unique). Contract `foreign_key` constraints are read too. Folders become sections. If you do not have the artifacts, `dbt parse` writes the manifest
+  without querying the warehouse (needs dbt-core, an adapter, and a `profiles.yml`; a throwaway DuckDB profile
+  worked for five projects), but without a catalog only declared columns appear, with no types.
+  `dbt docs generate` makes the catalog and does query the warehouse. On Databricks, prefer the manifest and catalog your CI
+  or dbt Cloud job already produced over running dbt yourself. A project with few tests draws few foreign keys.
 - **SQLAlchemy:** `python schemaviz.py sqlalchemy app.models:Base --out schema.dbml` (needs sqlalchemy; run it where the
   app's dependencies are installed). Reads `comment=` as the descriptions and `info={"group": "..."}` on a table as its section.
 - **Django:** `python schemaviz.py django mysite.settings --out schema.dbml` (needs django; run it where the project's
@@ -32,6 +44,10 @@ Use whatever is cheapest and most accurate:
   `help_text` becomes the column note, the model docstring's first line the table note, the app label the section.
   Proxy models are skipped. Check the table count against the tables in a migrated database (`dbshell`, then `\dt`), not against the generator itself.
 - **A live database:** `python schemaviz.py db <sqlalchemy url> --out schema.dbml`. Reads `COMMENT ON` text.
+  Use the same database engine every time you regenerate a tracked file (sqlite and Postgres differ on types and
+  constraints), and skip migration bookkeeping tables (it does, e.g. `django_migrations`, `_prisma_migrations`).
+  Tested on sqlite only, where SQLAlchemy does not report a column's inline `UNIQUE`; for sqlite use
+  `sqlite3 app.db .schema > schema.sql` and the `sql` exporter instead.
 - **Anything else (Rails, TypeORM, Eloquent, Hibernate, Ecto, Sequelize, ...):** read the model or migration
   files and write the DBML yourself. Do not guess: every table and column in the output must come from the code.
 - **Large schemas (roughly 50+ tables) or declarative data** (a knex/Sequelize schema object, JSON/YAML, Diesel's
@@ -79,7 +95,7 @@ Ref: orders.user_id > users.id          // also accepted outside a table; < - <>
 TableGroup "Accounts" { users households }
 ```
 
-Columns are nullable unless `not null` or `pk`. Names with spaces go in double quotes. `//` starts a comment.
+Columns are nullable unless `not null` or `pk`. A type with spaces or `<>` (`struct<a:int,b:string>`, `character varying`) goes in double quotes. Names with spaces go in double quotes. `//` starts a comment.
 Strings are single-quoted; `'''triple'''` spans lines. Full syntax: https://dbml.dbdiagram.io/docs/
 
 ## 3. Render
@@ -127,6 +143,11 @@ python schemaviz.py diff --file docs/schema.dbml --from v1.4 --to HEAD \
 
 `old=new` renames a table; `table.old=new` renames a column. Renamed items show as changed, with "renamed from" and any
 other change, and a foreign key that only follows a renamed table is not reported as changed.
+
+**Size.** Measured: 306 tables render and lay out comfortably. At 1,530 tables the Tables tab still loads in about 2
+seconds (3.5 MB page), but the Overview tab's force layout takes about 50 seconds, freezes the page, and is unreadable at
+that scale. There is no filter flag yet, so for a very large project render a DBML you have trimmed to one area
+(`grep`/script the tables you want) and tell the user the diagram is partial.
 
 ## What the renderer decides for you
 

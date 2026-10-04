@@ -144,7 +144,7 @@
   li.d-removed .n, li.d-removed .t { text-decoration: line-through; }
   li .dm { font-weight: 700; margin-right: 4px; }
   li.d-added .dm { color: var(--add); } li.d-removed .dm { color: var(--del); } li.d-changed .dm { color: var(--chg); }
-  li .was { color: var(--chg); font: 11px var(--ui); }
+  li .was, .tcomment.was { color: var(--chg); font: 11px var(--ui); }
   @media (prefers-reduced-motion: reduce) { .card, .card.flash { transition: none; animation: none; } }
 </style>
 <main>
@@ -204,6 +204,7 @@ const DIFF = DATA.diff, DMARK = { added: '+', removed: '\u2212', changed: '~' };
 function dTable(card, t) {
   if (!t.diff) return; card.classList.add('d-' + t.diff);
   const h = card.querySelector(':scope > button, :scope > .hd');
+  if (t.was) { const w = el('p', 'tcomment was', t.was); if (h) h.after(w); }
   if (h) h.insertBefore(el('span', 'dbadge ' + t.diff, DMARK[t.diff] + ' ' + (t.renamed_from ? 'renamed from ' + t.renamed_from : t.diff)), h.querySelector('small, .close'));
 }
 function dCol(li, c) {

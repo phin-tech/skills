@@ -238,8 +238,9 @@ def _parse_table(name: str, body: str, refs: list) -> dict:
         body = body[: nm.start()] + body[nm.end() :]
 
     for ln in _join_open_brackets([l for l in body.splitlines() if l.strip()]):
-        m = re.match(r'\s*("[^"]+"|`[^`]+`|\w+)\s+("[^"]+"|[\w.]+(?:\([^)]*\))?(?:\[\])?)\s*(?:\[(.*)\])?\s*$', ln, re.S)
+        m = re.match(r'\s*("[^"]+"|`[^`]+`|\w+)\s+("[^"]+"|[\w.]+(?:<[^\[\]]*>|\([^)]*\))?(?:\[\])?)\s*(?:\[(.*)\])?\s*$', ln, re.S)
         if not m:
+            print(f"warning: table {name}: could not read this line, skipped: {ln.strip()[:90]}", file=sys.stderr)
             continue
         col = {"n": _ident(m.group(1)), "t": _unquote(m.group(2)).lower(), "pk": False, "uq": False, "null": True}
         for item in _split_top(m.group(3) or ""):
@@ -356,7 +357,7 @@ def order_groups(tables: list[dict], hub: str | None) -> list[dict]:
             return depth[name]
         parents = {c["fk"][0] for c in by_name[name]["cols"]
                    if "fk" in c and c["fk"][0] != name and c["fk"][0] not in seen and c["fk"][0] in by_name}
-        depth[name] = 0 if not parents else 1 + max(d(p, seen + (name,)) for p in parents)
+        depth[name] = 0 if not parents else 1 + max(d(p, seen + (name,)) for p in sorted(parents))  # sorted: set order varies per run
         return depth[name]
 
     for t in tables:
@@ -370,10 +371,20 @@ def order_groups(tables: list[dict], hub: str | None) -> list[dict]:
 
 
 def to_html(tables: list[dict], title: str, source: str, diff: dict | None = None) -> str:
-    names = {t["name"] for t in tables}
-    for t in tables:  # a ref to a table that isn't in the file can't be drawn
+    by = {t["name"]: t for t in tables}
+    for t in tables:  # a ref to a table or column that isn't in the file can't be drawn
         for c in t["cols"]:
-            if "fk" in c and c["fk"][0] not in names:
+            if "fk" not in c:
+                continue
+            if c["fk"][0] not in by:
+                del c["fk"]
+                continue
+            hit = next((x["n"] for x in by[c["fk"][0]]["cols"] if x["n"] == c["fk"][1]), None) or \
+                next((x["n"] for x in by[c["fk"][0]]["cols"] if x["n"].lower() == c["fk"][1].lower()), None)
+            if hit:
+                c["fk"][1] = hit
+            else:
+                print(f"warning: {t['name']}.{c['n']} points at {c['fk'][0]}.{c['fk'][1]}, which has no such column; link skipped", file=sys.stderr)
                 del c["fk"]
     hub = find_hub(tables)
     assign_groups(tables, hub)
@@ -382,25 +393,31 @@ def to_html(tables: list[dict], title: str, source: str, diff: dict | None = Non
     return html.replace("/*TITLE*/", re.sub(r"[<>&]", "", title)).replace("/*DATA*/{}", data.replace("</", "<\\/"))
 
 
-def load_tables(path: Path) -> list[dict]:
-    text = path.read_text()
-    tables = parse_json(text) if path.suffix == ".json" else parse_dbml(text)
+def parse_text(text: str, name: str) -> list[dict]:
+    tables = parse_json(text) if name.endswith(".json") else parse_dbml(text)
     if not tables:
-        raise SystemExit(f"No tables found in {path}.")
+        raise SystemExit(f"No tables found in {name}.")
     return tables
 
 
-def load_from_git(rev: str, file: str) -> list[dict]:
-    """The tables in `file` as committed at `rev` (any tag, branch or commit), read with `git show`."""
+def load_tables(path: Path) -> list[dict]:
+    return parse_text(path.read_text(), path.name)
+
+
+def git_text(rev: str, file: str) -> str:
+    """The contents of `file` as committed at `rev` (any tag, branch or commit), read with `git show`."""
     import subprocess
 
     r = subprocess.run(["git", "show", f"{rev}:./{file}"], capture_output=True, text=True)
     if r.returncode:
         raise SystemExit(f"git could not read {file} at {rev}: {r.stderr.strip()}")
-    tables = parse_json(r.stdout) if file.endswith(".json") else parse_dbml(r.stdout)
-    if not tables:
-        raise SystemExit(f"No tables found in {file} at {rev}.")
-    return tables
+    return r.stdout
+
+
+def header_source(text: str) -> str:
+    """The `// Source:` line an exporter wrote, e.g. 'database postgresql'. Empty for hand-written DBML."""
+    m = re.search(r"(?m)^// Source: (.+)$", text)
+    return m.group(1).strip() if m else ""
 
 
 def _short_rev(rev: str) -> str:
@@ -408,10 +425,10 @@ def _short_rev(rev: str) -> str:
     return rev[:7] if re.fullmatch(r"[0-9a-f]{12,40}", rev) else rev
 
 
-def _col_changes(o: dict, n: dict, trn: dict | None = None) -> list[str]:
+def _col_changes(o: dict, n: dict, trn: dict | None = None, notes: bool = False) -> list[str]:
     """What differs between two versions of the same column, as short phrases."""
     out = []
-    if o["t"] != n["t"]:
+    if norm_type(o["t"]) != norm_type(n["t"]):
         out.append(f"{o['t'] or '?'} -> {n['t'] or '?'}")
     if o["null"] != n["null"]:
         out.append("now nullable" if n["null"] else "now not null")
@@ -424,9 +441,31 @@ def _col_changes(o: dict, n: dict, trn: dict | None = None) -> list[str]:
         of = [trn[of[0]], *of[1:]]  # the table it points at was renamed: not a change to this column
     if (of and of[:2]) != (nf and nf[:2]):
         out.append("fk " + (f"{of[0]}.{of[1]}" if of else "none") + " -> " + (f"{nf[0]}.{nf[1]}" if nf else "none"))
-    if o.get("note") != n.get("note"):
+    if notes and o.get("note") != n.get("note"):
         out.append("note edited")
     return out
+
+
+# Tables that record which migrations ran. They are not part of the application's schema.
+BOOKKEEPING = {"alembic_version", "django_migrations", "schema_migrations", "ar_internal_metadata", "_prisma_migrations",
+               "__diesel_schema_migrations", "knex_migrations", "knex_migrations_lock", "sequelizemeta", "flyway_schema_history",
+               "goose_db_version", "__efmigrationshistory", "databasechangelog", "databasechangeloglock", "sqlite_sequence"}
+
+_TYPE_ALIASES = {"int": "integer", "int4": "integer", "int8": "bigint", "int2": "smallint", "bool": "boolean",
+                 "character varying": "varchar", "char varying": "varchar", "character": "char", "bpchar": "char",
+                 "double precision": "float8", "float4": "real", "decimal": "numeric",
+                 "timestamp with time zone": "timestamptz", "timestamp without time zone": "timestamp",
+                 "time with time zone": "timetz", "time without time zone": "time"}
+
+
+def norm_type(t: str) -> str:
+    """One spelling per SQL type (int/int4/integer, bool/boolean, ...) so a respelling is not reported as a change."""
+    t = re.sub(r"\s+", " ", (t or "").strip().lower())
+    m = re.match(r"([a-z0-9_ ]+?)\s*(\(.*?\))?\s*(\[\])?$", t)
+    if not m:
+        return t
+    base, args, arr = m.groups()
+    return _TYPE_ALIASES.get(base, base) + (re.sub(r"\s+", "", args) if args else "") + (arr or "")
 
 
 def parse_renames(specs: list[str]) -> tuple[dict, dict]:
@@ -444,7 +483,7 @@ def parse_renames(specs: list[str]) -> tuple[dict, dict]:
     return tables, cols
 
 
-def diff_tables(old: list[dict], new: list[dict], renames: list[str] | None = None) -> tuple[list[dict], dict]:
+def diff_tables(old: list[dict], new: list[dict], renames: list[str] | None = None, notes: bool = False) -> tuple[list[dict], dict]:
     """Merge two schemas into one list. Every table and column gets a `diff` of added, removed or changed
     (absent when unchanged), changed columns get `was`, renamed tables get `renamed_from`. Removed tables and
     columns stay, so they can be shown. `renames` are confirmed renames (see parse_renames)."""
@@ -484,7 +523,7 @@ def diff_tables(old: list[dict], new: list[dict], renames: list[str] | None = No
                 c["diff"] = "added"; stats["cols_added"] += 1; changed = True
                 continue
             seen_old.add(src)
-            why = _col_changes(oc, c, trn)
+            why = _col_changes(oc, c, trn, notes)
             if src != c["n"]:
                 why.insert(0, f"renamed from {src}")
             if why:
@@ -502,6 +541,7 @@ def diff_tables(old: list[dict], new: list[dict], renames: list[str] | None = No
             stats["cols_removed"] += 1; changed = True
         if sorted(o["uniq"]) != sorted(t["uniq"]):
             changed = True
+            t["was"] = "unique together was " + (", ".join(f"({u})" for u in o["uniq"]) or "none") + ", now " + (", ".join(f"({u})" for u in t["uniq"]) or "none")
         if changed:
             t["diff"] = "changed"
             stats["tables_changed"] += 1
@@ -550,9 +590,13 @@ def rename_hints(old: list[dict], new: list[dict], renames: list[str] | None = N
 # ---- DBML writer, for the exporters below -----------------------------------------------------------------------
 
 
-def to_dbml(tables: list[dict]) -> str:
+def to_dbml(tables: list[dict], command: str = "", source: str = "") -> str:
     q = lambda s: "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ") + "'"
-    out = ["// Generated by scripts/schemaviz. Paste into https://dbdiagram.io/d\n"]
+    out = ["// Generated by: schemaviz.py " + command if command else "// Generated by schemaviz.py"]
+    if source:
+        out.append("// Source: " + source)
+    out.append("// Paste into https://dbdiagram.io/d\n")
+    tables = sorted(tables, key=lambda t: t["name"])
     for t in tables:
         out.append(f"Table {t['name']} {{")
         composite = sum(1 for c in t["cols"] if c["pk"]) > 1
@@ -568,7 +612,8 @@ def to_dbml(tables: list[dict]) -> str:
                 bits.append(f"ref: {c['fk'][2]} {c['fk'][0]}.{c['fk'][1]}")
             if c.get("note"):
                 bits.append(f"note: {q(c['note'])}")
-            typ = f'"{c["t"]}"' if " " in c["t"] and "(" not in c["t"] else c["t"]
+            ty = c["t"] or "unknown"
+            typ = ty if re.fullmatch(r"[\w.]+(\([\d,\s]+\))?(\[\])?", ty) else '"' + ty + '"'
             out.append(f"  {c['n']} {typ or 'varchar'}" + (f" [{', '.join(bits)}]" if bits else ""))
         if t["comment"]:
             out.append(f"\n  Note: {q(t['comment'])}")
@@ -591,7 +636,7 @@ def to_dbml(tables: list[dict]) -> str:
 # ---- optional exporters: read a code base or a database, write DBML ---------------------------------------------
 
 
-def _read_sqlalchemy(md) -> list[dict]:
+def _read_sqlalchemy(md, extra_unique: dict | None = None) -> list[dict]:
     from sqlalchemy import Index, UniqueConstraint
     from sqlalchemy.dialects import postgresql
 
@@ -605,10 +650,12 @@ def _read_sqlalchemy(md) -> list[dict]:
 
     tables = []
     for t in md.sorted_tables:
-        if t.name == "alembic_version":
+        if t.name.lower() in BOOKKEEPING:
             continue
         sets = [tuple(c.name for c in k.columns) for k in t.constraints if isinstance(k, UniqueConstraint)]
         sets += [tuple(c.name for c in ix.columns) for ix in t.indexes if isinstance(ix, Index) and ix.unique]
+        sets += (extra_unique or {}).get(t.name, [])
+        sets = list(dict.fromkeys(sets))
         single = {u[0] for u in sets if len(u) == 1}
         cols = []
         for c in t.columns:
@@ -637,7 +684,7 @@ def export_sqlalchemy(spec: str) -> str:
     md = obj if isinstance(obj, MetaData) else obj.metadata if (isinstance(obj, type) and issubclass(obj, DeclarativeBase)) or hasattr(obj, "metadata") else None
     if md is None:
         raise SystemExit(f"{spec} is neither a MetaData nor a declarative base")
-    return to_dbml(_read_sqlalchemy(md))
+    return to_dbml(_read_sqlalchemy(md), f"sqlalchemy {spec}", "sqlalchemy models")
 
 
 def _read_django() -> list[dict]:
@@ -687,7 +734,409 @@ def export_django(settings: str) -> str:
     if not os.environ.get("DJANGO_SETTINGS_MODULE"):
         raise SystemExit("Pass the settings module (e.g. mysite.settings) or set DJANGO_SETTINGS_MODULE.")
     django.setup()
-    return to_dbml(_read_django())
+    return to_dbml(_read_django(), f"django {settings}", "django models")
+
+
+# ---- SQL DDL reader: a schema-only dump (pg_dump --schema-only, structure.sql, prisma migrate diff --script, .schema) ----
+
+_SQL_ID = r'(?:"[^"]+"|`[^`]+`|\[[^\]]+\]|[\w$]+)'
+_SQL_NAME = rf"{_SQL_ID}(?:\s*\.\s*{_SQL_ID})*"
+
+
+def _sql_clean(sql: str) -> list[str]:
+    """Statements of a SQL script, with comments removed. Splits on ; outside quotes and $$ blocks."""
+    out, cur, i, n = [], [], 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if sql.startswith("--", i):
+            j = sql.find("\n", i); i = n if j < 0 else j; continue
+        if sql.startswith("/*", i):
+            j = sql.find("*/", i + 2); i = n if j < 0 else j + 2; continue
+        if c in "'\"`":
+            j = i + 1
+            while j < n:
+                if sql[j] == c and sql[j + 1 : j + 2] == c:
+                    j += 2
+                elif sql[j] == c:
+                    break
+                else:
+                    j += 1
+            cur.append(sql[i : j + 1]); i = j + 1; continue
+        m = re.match(r"\$(\w*)\$", sql[i:]) if c == "$" else None
+        if m:
+            end = sql.find(m.group(0), i + len(m.group(0)))
+            end = n if end < 0 else end + len(m.group(0))
+            cur.append(sql[i:end]); i = end; continue
+        if c == ";":
+            out.append("".join(cur).strip()); cur = []
+        else:
+            cur.append(c)
+        i += 1
+    out.append("".join(cur).strip())
+    return [x for x in out if x]
+
+
+def _sql_ident(s: str) -> str:
+    s = s.strip()
+    return s[1:-1] if len(s) > 1 and s[0] in '"`[' else s
+
+
+def _sql_table(name: str) -> str:
+    return _sql_ident(re.findall(_SQL_ID, name)[-1])
+
+
+def _sql_key(name: str) -> tuple[str, str]:
+    """`schema.table` -> ('schema', 'table'); an unqualified name has schema ''."""
+    parts = [_sql_ident(x) for x in re.findall(_SQL_ID, name)]
+    return (parts[-2] if len(parts) > 1 else "", parts[-1])
+
+
+def _sql_cols(s: str) -> list[str]:
+    return [_sql_ident(x) for x in _split_top(s.strip().strip("()"))]
+
+
+_SQL_CONSTRAINT = re.compile(r"\b(?:not\s+null|null|default|primary\s+key|unique|references|check|constraint|generated|collate|"
+                             r"auto_?increment|comment|identity|on\s+update)\b|\bas\s*\(", re.I)
+
+
+def _sql_type(t: str) -> str:
+    m = re.fullmatch(r'\s*(?:\w+\.)?"([^"]+)"(\[\])?\s*', t)  # a user type such as an enum: keep its name as written
+    return m.group(1) + (m.group(2) or "") if m else norm_type(t)
+
+
+def _sql_column(d: str) -> dict | None:
+    m = re.match(rf"\s*({_SQL_ID})(?:\s+(.*))?$", d, re.S)
+    if not m:
+        return None
+    name, rest = _sql_ident(m.group(1)), m.group(2) or ""
+    k = _SQL_CONSTRAINT.search(rest)
+    typ = (rest[: k.start()] if k else rest).strip()
+    flags = rest[k.start():] if k else ""
+    col = {"n": name, "t": _sql_type(typ), "pk": bool(re.search(r"primary\s+key", flags, re.I)),
+           "uq": bool(re.search(r"\bunique\b", flags, re.I)), "null": not re.search(r"not\s+null|primary\s+key", flags, re.I)}
+    r = re.search(rf"references\s+({_SQL_NAME})\s*(\(([^)]*)\))?", flags, re.I)
+    if r:
+        col["fk"] = [_sql_key(r.group(1)), _sql_ident(r.group(3).split(",")[0]) if r.group(3) else None, ">"]
+    return col
+
+
+def _sql_constraint(t: dict, d: str) -> bool:
+    """Apply a table-level constraint (PRIMARY KEY, UNIQUE, FOREIGN KEY) to table t. False if it is something else."""
+    d = re.sub(rf"^\s*constraint\s+{_SQL_ID}\s+", "", d, flags=re.I)
+    cols = {c["n"]: c for c in t["cols"]}
+    m = re.match(r"\s*primary\s+key\s*(?:\w+\s*)?(\([^)]*\))", d, re.I)
+    if m:
+        for n in _sql_cols(m.group(1)):
+            if n in cols:
+                cols[n]["pk"] = True; cols[n]["null"] = False
+        return True
+    m = re.match(r"\s*unique(?:\s+(?:key|index))?\s*(?:" + _SQL_ID + r"\s*)?(\([^)]*\))", d, re.I)
+    if m:
+        names = _sql_cols(m.group(1))
+        if len(names) == 1 and names[0] in cols:
+            cols[names[0]]["uq"] = True
+        elif all(n in cols for n in names) and ", ".join(names) not in t["uniq"]:
+            t["uniq"].append(", ".join(names))
+        return True
+    m = re.match(rf"\s*foreign\s+key\s*(?:{_SQL_ID}\s*)?(\([^)]*\))\s*references\s+({_SQL_NAME})\s*(\([^)]*\))?", d, re.I)
+    if m:
+        here, there = _sql_cols(m.group(1)), (_sql_cols(m.group(3)) if m.group(3) else [None] * len(_sql_cols(m.group(1))))
+        for a, b in zip(here, there):
+            if a in cols and "fk" not in cols[a]:
+                cols[a]["fk"] = [_sql_key(m.group(2)), b, ">"]
+        return True
+    return bool(re.match(r"\s*(check|exclude|index|key|fulltext|spatial|like)\b", d, re.I))
+
+
+def _read_sql(text: str) -> list[dict]:
+    tables: dict[tuple, dict] = {}  # keyed by (schema, table): auth.users and public.users are different tables
+    stmts = _sql_clean(text)
+
+    def find(name: str, near: str = "") -> tuple | None:
+        key = _sql_key(name)
+        if key in tables:
+            return key
+        if key[0]:
+            return None
+        same = [k for k in tables if k[1] == key[1]]
+        return next((k for k in same if k[0] == near), None) or next((k for k in same if k[0] == "public"), None) or (sorted(same)[0] if same else None)
+
+    create = re.compile(rf"create\s+(?:(?:global\s+|local\s+)?(?:temp(?:orary)?\s+|unlogged\s+))?table\s+(?:if\s+not\s+exists\s+)?({_SQL_NAME})\s*\((.*)\)[^()]*$", re.I | re.S)
+    for st in stmts:
+        m = create.match(st)
+        if not m:
+            continue
+        key = _sql_key(m.group(1))
+        t = {"name": key[1], "comment": "", "group": None, "cols": [], "uniq": [], "_schema": key[0]}
+        pending = []
+        for part in _split_top(m.group(2)):
+            if re.match(r"\s*(constraint|primary\s+key|unique|foreign\s+key|check|exclude|index|key|fulltext|spatial|like)\b", part, re.I):
+                pending.append(part)
+                continue
+            col = _sql_column(part)
+            if col:
+                t["cols"].append(col)
+        for part in pending:
+            _sql_constraint(t, part)
+        tables[key] = t
+    for st in stmts:
+        m = re.match(rf"alter\s+table\s+(?:only\s+)?(?:if\s+exists\s+)?({_SQL_NAME})\s+(.*)$", st, re.I | re.S)
+        if m and find(m.group(1)):
+            t = tables[find(m.group(1))]
+            for act in _split_top(m.group(2)):
+                a = re.sub(r"^\s*add\s+", "", act, flags=re.I)
+                if a == act:
+                    continue
+                mc = re.match(r"column\s+(?:if\s+not\s+exists\s+)?(.*)$", a, re.I | re.S)
+                if mc:
+                    col = _sql_column(mc.group(1))
+                    if col and col["n"] not in {c["n"] for c in t["cols"]}:
+                        t["cols"].append(col)
+                else:
+                    _sql_constraint(t, a)
+            continue
+        m = re.match(rf"create\s+unique\s+index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?(?:{_SQL_NAME}\s+)?on\s+(?:only\s+)?({_SQL_NAME})\s*(?:using\s+\w+\s*)?(\(.*\))\s*$", st, re.I | re.S)
+        if m and find(m.group(1)):
+            names = _split_top(m.group(2)[1:-1])
+            if all(re.fullmatch(_SQL_ID, n.split()[0]) for n in names):
+                _sql_constraint(tables[find(m.group(1))], f"unique ({', '.join(n.split()[0] for n in names)})")
+            continue
+        m = re.match(rf"comment\s+on\s+table\s+({_SQL_NAME})\s+is\s+'((?:[^']|'')*)'", st, re.I | re.S)
+        if m and find(m.group(1)):
+            tables[find(m.group(1))]["comment"] = m.group(2).replace("''", "'")
+            continue
+        m = re.match(rf"comment\s+on\s+column\s+({_SQL_NAME})\s+is\s+'((?:[^']|'')*)'", st, re.I | re.S)
+        if m:
+            parts = re.findall(_SQL_ID, m.group(1))
+            k = find(".".join(parts[:-1])) if len(parts) >= 2 else None
+            for c in (tables[k]["cols"] if k else []):
+                if c["n"] == _sql_ident(parts[-1]):
+                    c["note"] = m.group(2).replace("''", "'")
+    keep = {k: t for k, t in tables.items() if k[1].lower() not in BOOKKEEPING}
+    count = defaultdict(int)
+    for k in keep:
+        count[k[1]] += 1
+    shown = {k: (k[1] if count[k[1]] == 1 or not k[0] else f"{k[0]}__{k[1]}") for k in keep}
+    if any(v > 1 for v in count.values()):
+        print("note: some table names occur in more than one schema; those are written as schema__table", file=sys.stderr)
+    pk = {k: next((c["n"] for c in t["cols"] if c["pk"]), None) for k, t in keep.items()}
+    for k, t in keep.items():
+        t["name"] = shown[k]
+        t.pop("_schema", None)
+    for k, t in keep.items():
+        for c in t["cols"]:
+            if "fk" not in c:
+                continue
+            tk = c["fk"][0]
+            dest = tk if tk in keep else None
+            if dest is None:
+                same = [x for x in keep if x[1] == tk[1]]
+                dest = (next((x for x in same if x[0] == tk[0]), None) if tk[0] else
+                        next((x for x in same if x[0] == k[0]), None) or next((x for x in same if x[0] == "public"), None)
+                        or (sorted(same)[0] if same else None))
+            c["fk"][0] = shown[dest] if dest else tk[1]
+            c["fk"][1] = c["fk"][1] or (pk.get(dest) if dest else None) or "id"
+            if c["pk"] and sum(x["pk"] for x in t["cols"]) == 1:
+                c["fk"][2] = "-"  # a primary key that is also a foreign key is one-to-one
+    return list(keep.values())
+
+
+def export_sql(path: str, dialect: str = "") -> str:
+    p = Path(path)
+    tables = _read_sql(p.read_text())
+    if not tables:
+        raise SystemExit(f"No CREATE TABLE statements found in {path}.")
+    return to_dbml(tables, f"sql {p.name}", f"sql {dialect}".strip() if dialect else "sql dump")
+
+
+# ---- dbt: target/manifest.json (+ catalog.json for warehouse types), written by `dbt parse` / `dbt docs generate` ----
+
+
+def _dbt_ref(expr: str) -> tuple[str, str, str] | None:
+    """`ref('x')`, `ref('pkg', 'x')` or `source('src', 'tbl')` -> (kind, scope, name)."""
+    m = re.search(r"\b(ref|source)\(\s*['\"]([^'\"]+)['\"](?:\s*,\s*['\"]([^'\"]+)['\"])?", expr or "")
+    if not m:
+        return None
+    kind, a, b = m.groups()
+    return (kind, a, b) if b else (kind, "", a)
+
+
+def _dbt_desc(text: str) -> str:
+    """A dbt description as one line, cut before any markdown table (those do not fit on a card)."""
+    lines = []
+    for ln in (text or "").splitlines():
+        if ln.strip().startswith("|"):
+            break
+        lines.append(ln.strip())
+    return " ".join(" ".join(lines).split())
+
+
+def _read_dbt(manifest: dict, catalog: dict | None, with_sources: bool) -> list[dict]:
+    root = (manifest.get("metadata") or {}).get("project_name")
+    cat = {**((catalog or {}).get("nodes") or {}), **((catalog or {}).get("sources") or {})}
+    picked = []  # (unique_id, node, is_source)
+    for uid, n in sorted((manifest.get("nodes") or {}).items()):
+        if n.get("resource_type") in ("model", "seed", "snapshot") and (n.get("config") or {}).get("materialized") != "ephemeral":
+            picked.append((uid, n, False))
+    if with_sources:
+        picked += [(uid, n, True) for uid, n in sorted((manifest.get("sources") or {}).items())]
+
+    def relation(n: dict) -> str:
+        rn = n.get("relation_name") or ""
+        return _sql_ident(re.findall(_SQL_ID, rn)[-1]) if rn else (n.get("alias") or n.get("identifier") or n["name"])
+
+    names: dict[str, list] = defaultdict(list)
+    for uid, n, src in picked:
+        names[relation(n)].append(uid)
+    multi_pkg = len({n.get("package_name") for _, n, _ in picked}) > 1
+    def schema_of(n: dict) -> str:
+        rn = n.get("relation_name") or ""
+        parts = [_sql_ident(x) for x in re.findall(_SQL_ID, rn)]
+        return parts[-2] if len(parts) >= 2 else (n.get("schema") or "")
+
+    tname, used = {}, set()
+    for uid, n, _ in picked:
+        base = relation(n)
+        cands = [base] if len(names[base]) == 1 else [f"{schema_of(n)}__{base}", f"{n.get('package_name')}__{schema_of(n)}__{base}"]
+        name, k = next((c for c in cands if c not in used), None), 2
+        while name is None:  # still taken: number it
+            name = f"{cands[-1]}_{k}" if f"{cands[-1]}_{k}" not in used else None
+            k += 1
+        tname[uid] = name
+        used.add(name)
+    clashes = sum(1 for v in names.values() if len(v) > 1)
+    if clashes:
+        print(f"note: {clashes} table name(s) occur in more than one schema or package; the later ones are written as schema__table", file=sys.stderr)
+    by_ref: dict[tuple, str] = {}  # how a ref()/source() points at a table
+    for uid, n, src in picked:
+        key = ("source", n.get("source_name", ""), n["name"]) if src else ("ref", "", n["name"])
+        by_ref.setdefault(key, uid)
+        if not src:
+            by_ref.setdefault(("ref", n.get("package_name", ""), n["name"]), uid)
+        if not src and n.get("package_name") == root:
+            by_ref[key] = uid  # the project's own model wins over a package's model of the same name
+
+    tables: dict[str, dict] = {}
+    for uid, n, src in picked:
+        c = cat.get(uid, {}).get("columns") or {}
+        declared = n.get("columns") or {}
+        order = [k for k, _ in sorted(c.items(), key=lambda kv: kv[1].get("index", 0))]
+        if not c:  # a catalog lists what the warehouse really has; without one, fall back on the declared columns
+            order = list(declared)
+        cols = []
+        for k in order:
+            d = declared.get(k) or next((v for dk, v in declared.items() if dk.lower() == k.lower()), {})
+            ctype = (c.get(k) or {}).get("type") or d.get("data_type") or "unknown"
+            col = {"n": k, "t": norm_type(ctype), "pk": False, "uq": False, "null": True}
+            if d.get("description"):
+                col["note"] = _dbt_desc(d["description"])
+            for ct in d.get("constraints") or []:
+                _dbt_constraint(col, ct)
+            cols.append(col)
+        folder = (n.get("path") or "").replace("\\", "/").split("/")
+        group = "sources" if src else (folder[0] if len(folder) > 1 else (n.get("resource_type") or "model") + "s")
+        if multi_pkg and not src:
+            group = f"{n.get('package_name')} / {group}"
+        tables[uid] = {"name": tname[uid], "comment": _dbt_desc(n.get("description")), "group": group,
+                       "cols": cols, "uniq": [], "uid": uid}
+        for ct in n.get("constraints") or []:
+            for k in ct.get("columns") or []:
+                col = next((x for x in cols if x["n"].lower() == k.lower()), None)
+                if col and len(ct["columns"]) == 1:
+                    _dbt_constraint(col, ct)
+                elif col and ct.get("type") in ("primary_key", "unique"):
+                    tables[uid]["uniq"].append(", ".join(ct["columns"])) if k == ct["columns"][0] else None
+    for uid, n, src in picked:
+        t = tables[uid]
+        cts = [(k, ct) for k, d in (n.get("columns") or {}).items() for ct in (d.get("constraints") or [])]
+        cts += [(ct["columns"][0], ct) for ct in (n.get("constraints") or []) if len(ct.get("columns") or []) == 1]
+        for k, ct in cts:
+            if ct.get("type") != "foreign_key":
+                continue
+            col = next((x for x in t["cols"] if x["n"].lower() == k.lower()), None)
+            r = _dbt_ref(ct.get("to") or "")
+            dest, field = (by_ref.get(r) if r else None), (ct.get("to_columns") or [None])[0]
+            if not r and ct.get("expression"):  # older dbt: "other_table (id)" or "db.schema.other_table (id)"
+                m = re.match(rf"\s*({_SQL_NAME})\s*\(\s*({_SQL_ID})", ct["expression"])
+                if m:
+                    want = _sql_table(m.group(1)).lower()
+                    dest = next((u for u, x in tables.items() if x["name"].split("__")[-1].lower() == want), None)
+                    field = _sql_ident(m.group(2))
+            if col and dest in tables and "fk" not in col:
+                col["fk"] = [tables[dest]["name"], field or "id", ">"]
+    # tests: unique / not_null / relationships (a foreign key) / unique_combination_of_columns
+    skipped = 0
+    for uid, t in sorted((manifest.get("nodes") or {}).items()):
+        md = t.get("test_metadata") or {}
+        if t.get("resource_type") != "test" or not md:
+            continue
+        kw = md.get("kwargs") or {}
+        target = t.get("attached_node")
+        if not target:
+            r = _dbt_ref(kw.get("model", ""))
+            target = by_ref.get(r) if r else None
+        if target not in tables:
+            continue
+        tb = tables[target]
+        colname = t.get("column_name") or kw.get("column_name")
+        col = next((x for x in tb["cols"] if colname and x["n"].lower() == colname.lower()), None)
+        kind = md.get("name")
+        if kind == "unique" and col:
+            col["uq"] = True
+        elif kind == "not_null" and col:
+            col["null"] = False
+        elif kind == "unique_combination_of_columns":
+            combo = kw.get("combination_of_columns") or []
+            if combo:
+                tb["uniq"].append(", ".join(combo))
+        elif kind == "relationships" and col:
+            r = _dbt_ref(kw.get("to", ""))
+            dest = by_ref.get(r) if r else None
+            if dest in tables:
+                col.setdefault("fk", [tables[dest]["name"], kw.get("field") or "id", ">"])
+            else:
+                skipped += 1
+    for t in tables.values():
+        if any(c["pk"] for c in t["cols"]):
+            continue  # a contract declared the key
+        cand = [c for c in t["cols"] if c["uq"] and not c["null"]]
+        if len(cand) == 1:
+            cand[0]["pk"] = True  # dbt convention: the one unique + not_null column is the key (several: leave them unique)
+    for t in tables.values():
+        t["uniq"] = sorted(set(t["uniq"]))
+        t.pop("uid", None)
+        for c in t["cols"]:
+            if "fk" in c and c["pk"]:
+                c["fk"][2] = "-"
+    if skipped:
+        print(f"note: {skipped} relationships test(s) point at models that are not in this diagram (sources? ephemeral?), skipped", file=sys.stderr)
+    return list(tables.values())
+
+
+def _dbt_constraint(col: dict, ct: dict) -> None:
+    kind = ct.get("type")
+    if kind == "primary_key":
+        col["pk"] = True; col["null"] = False
+    elif kind == "not_null":
+        col["null"] = False
+    elif kind == "unique":
+        col["uq"] = True
+
+
+def export_dbt(manifest_path: str, catalog_path: str | None, with_sources: bool) -> str:
+    mp = Path(manifest_path)
+    manifest = json.loads(mp.read_text())
+    cp = Path(catalog_path) if catalog_path else mp.with_name("catalog.json")
+    catalog = json.loads(cp.read_text()) if cp.exists() else None
+    if catalog is None and catalog_path:
+        raise SystemExit(f"{catalog_path} not found.")
+    tables = _read_dbt(manifest, catalog, with_sources)
+    if not tables:
+        raise SystemExit(f"No models, seeds or snapshots found in {manifest_path}.")
+    adapter = (manifest.get("metadata") or {}).get("adapter_type") or "unknown adapter"
+    typed = "with warehouse types" if catalog else "no catalog: types only where declared"
+    print(f"dbt: {len(tables)} tables, {typed}", file=sys.stderr)
+    return to_dbml(tables, f"dbt {mp.name}", f"dbt {adapter}" + ("" if catalog else " (no catalog)"))
 
 
 def export_database(url: str) -> str:
@@ -696,22 +1145,37 @@ def export_database(url: str) -> str:
     from sqlalchemy import MetaData, create_engine
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    md = MetaData()
+    md, uniq = MetaData(), {}
+
+    def reflect(conn) -> None:
+        from sqlalchemy import inspect
+
+        md.reflect(conn)
+        insp = inspect(conn)  # reflection alone drops some unique constraints (sqlite's inline UNIQUE, for one)
+        for n in md.tables:
+            try:
+                sets = [tuple(u["column_names"]) for u in insp.get_unique_constraints(n)]
+                sets += [tuple(i["column_names"]) for i in insp.get_indexes(n) if i.get("unique") and all(i["column_names"])]
+            except NotImplementedError:  # a dialect that cannot list them: keep what reflection found
+                sets = []
+            uniq[n] = sets
+
     if any(d in url for d in ("asyncpg", "aiosqlite", "aiomysql", "+async")):
         async def go() -> None:
             engine = create_async_engine(url)
             try:
                 async with engine.connect() as conn:
-                    await conn.run_sync(md.reflect)
+                    await conn.run_sync(reflect)
             finally:
                 await engine.dispose()
         asyncio.run(go())
     else:
         engine = create_engine(url)
         with engine.connect() as conn:
-            md.reflect(conn)
+            reflect(conn)
         engine.dispose()
-    return to_dbml(_read_sqlalchemy(md))
+    dialect = url.split(":", 1)[0].split("+", 1)[0]  # never write the URL: it may hold a password
+    return to_dbml(_read_sqlalchemy(md, uniq), f"db ({dialect})", f"database {dialect}")
 
 
 def _warn_missing_fks(tables: list) -> None:
@@ -746,6 +1210,7 @@ def main() -> None:
     f.add_argument("--to", dest="rev_to", metavar="REV", help="new revision; default is the file in the working tree")
     f.add_argument("--out", default="schema-diff.html")
     f.add_argument("--title")
+    f.add_argument("--notes", action="store_true", help="also report edited notes as changes (off by default: notes get reworded)")
     f.add_argument("--rename", action="append", metavar="OLD=NEW",
                    help="a rename confirmed in the code or git history: old=new for a table, table.old=new for a column (repeatable)")
     f.add_argument("--old-label", help="name for the old side, e.g. a commit hash or tag")
@@ -753,6 +1218,15 @@ def main() -> None:
     s = sub.add_parser("sqlalchemy", help="SQLAlchemy models -> DBML (needs sqlalchemy)")
     s.add_argument("models", metavar="MODULE:BASE")
     s.add_argument("--out", default="-")
+    q = sub.add_parser("sql", help="schema-only SQL (pg_dump --schema-only, structure.sql, prisma migrate diff --script) -> DBML")
+    q.add_argument("file")
+    q.add_argument("--dialect", default="", help="recorded in the DBML header, e.g. postgresql; diff warns when two files differ")
+    q.add_argument("--out", default="-")
+    b = sub.add_parser("dbt", help="dbt target/manifest.json (and catalog.json beside it) -> DBML")
+    b.add_argument("manifest")
+    b.add_argument("--catalog", help="catalog.json from `dbt docs generate`; default is the one next to the manifest, if any")
+    b.add_argument("--sources", action="store_true", help="also draw declared sources")
+    b.add_argument("--out", default="-")
     j = sub.add_parser("django", help="Django models -> DBML (needs django; run where the project's dependencies are installed)")
     j.add_argument("settings", nargs="?", default="", metavar="SETTINGS_MODULE")
     j.add_argument("--out", default="-")
@@ -765,15 +1239,21 @@ def main() -> None:
         if a.file:
             if not a.rev_from or a.old or a.new:
                 raise SystemExit("With --file, give --from REV (and optionally --to REV), and no positional files.")
-            old_t = load_from_git(a.rev_from, a.file)
-            new_t = load_from_git(a.rev_to, a.file) if a.rev_to else load_tables(Path(a.file))
+            old_x = git_text(a.rev_from, a.file)
+            new_x = git_text(a.rev_to, a.file) if a.rev_to else Path(a.file).read_text()
             lo, ln = a.old_label or _short_rev(a.rev_from), a.new_label or (_short_rev(a.rev_to) if a.rev_to else "working tree")
+            names = (a.file, a.file)
         else:
             if not (a.old and a.new):
                 raise SystemExit("Give two files, or --file F --from REV [--to REV].")
             lo, ln = a.old_label or Path(a.old).name, a.new_label or Path(a.new).name
-            old_t, new_t = load_tables(Path(a.old)), load_tables(Path(a.new))
-        tables, stats = diff_tables(old_t, new_t, a.rename)
+            old_x, new_x, names = Path(a.old).read_text(), Path(a.new).read_text(), (a.old, a.new)
+        old_t, new_t = parse_text(old_x, names[0]), parse_text(new_x, names[1])
+        so, sn = header_source(old_x), header_source(new_x)
+        if so and sn and so != sn:
+            print(f"warning: the two files were generated from different sources ({so} vs {sn}); type spellings and "
+                  "constraints can differ for that reason alone, so some changes below may not be real.", file=sys.stderr)
+        tables, stats = diff_tables(old_t, new_t, a.rename, a.notes)
         for h in rename_hints(old_t, new_t, a.rename):
             print(f"hint: possible rename: {h}. Check git, then pass --rename.", file=sys.stderr)
         info = dict(stats, old=lo, new=ln)
@@ -792,7 +1272,9 @@ def main() -> None:
         print(f"{a.out}: {len(tables)} tables, {ncols} columns, {nfks} foreign keys from {path.name}")
     else:
         dbml = (export_sqlalchemy(a.models) if a.cmd == "sqlalchemy"
-                else export_django(a.settings) if a.cmd == "django" else export_database(a.url))
+                else export_django(a.settings) if a.cmd == "django"
+                else export_sql(a.file, a.dialect) if a.cmd == "sql"
+                else export_dbt(a.manifest, a.catalog, a.sources) if a.cmd == "dbt" else export_database(a.url))
         if a.out == "-":
             sys.stdout.write(dbml)
         else:
