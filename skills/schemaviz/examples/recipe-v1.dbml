@@ -1,0 +1,43 @@
+Table users {
+  id integer [pk]
+  email varchar(100) [not null]
+  full_name varchar(120)
+  created_at timestamp [not null]
+  household_id integer [not null, ref: > households.id]
+  legacy_flag boolean
+  Note: 'A person who can sign in'
+}
+Table households { id integer [pk]
+  name varchar(80) [not null] }
+Table recipes {
+  id integer [pk]
+  author_id integer [ref: > users.id]
+  title varchar(200) [not null]
+  servings integer
+  minutes integer
+}
+Table ingredients { id integer [pk]
+  name varchar(80) [unique, not null] }
+Table recipe_ingredients {
+  recipe_id integer [not null, ref: > recipes.id]
+  ingredient_id integer [not null, ref: > ingredients.id]
+  qty varchar(30)
+  indexes { (recipe_id, ingredient_id) [pk] }
+}
+Table meal_plans {
+  id integer [pk]
+  household_id integer [not null, ref: > households.id]
+  week_start date [not null]
+}
+Table plan_slots {
+  id integer [pk]
+  plan_id integer [not null, ref: > meal_plans.id]
+  recipe_id integer [ref: > recipes.id]
+  day smallint [not null]
+}
+Table sessions_old { id integer [pk]
+  user_id integer [ref: > users.id]
+  token text }
+TableGroup "People" { users households sessions_old }
+TableGroup "Cooking" { recipes ingredients recipe_ingredients }
+TableGroup "Planning" { meal_plans plan_slots }

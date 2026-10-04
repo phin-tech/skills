@@ -28,11 +28,12 @@ npx skills add phin-tech/skills --skill schemaviz     # or copy this folder into
 | Command | What it does |
 |---|---|
 | `schemaviz render schema.dbml --out schema.html` | One self-contained HTML page. `--expect N` fails if the table count is not N. |
-| `schemaviz open schema.dbml` | Serve it locally and open the browser; the page reloads when the file changes. |
+| `schemaviz scan ./repo --out schema.dbml` | Find the schema in a repository: a DBML file, a dbt manifest, a SQL dump or migrations, or SQL written inside source code (Go, Python, JS, ...). Says what it read and what it could not apply. |
+| `schemaviz open ./repo` (or a file) | Serve it locally and open the browser; the page reloads when the file or repo changes. |
 | `schemaviz open schema.dbml --from v1.4 --to HEAD` | The same for what changed between two revisions, with a revision picker in the page. |
 | `schemaviz diff old.dbml new.dbml` | The changes between two files as a page. `--md summary.md` also writes a pull request summary. |
 | `schemaviz diff --file docs/schema.dbml --from v1.4 --to HEAD` | The changes between two revisions of a tracked file. |
-| `schemaviz publish ... --out-dir site` | A static folder for another tool to upload (see below). |
+| `schemaviz publish ... --out-dir site` | A static folder for another tool to upload (see below). `--fail-on dropped-table,dropped-column,not-null-added,type-changed` exits 2 after writing it, to gate CI; the default only reports. |
 | `schemaviz sqlalchemy`, `django`, `db`, `sql`, `dbt` | Write DBML from models, a SQL dump, dbt artifacts or a live database. |
 | `schemaviz doctor` | What works on this machine. |
 
@@ -64,6 +65,10 @@ what they were, removed ones red and struck through. A banner counts them. A ren
 addition until you confirm it with `--rename old=new` or `--rename table.old=new`; the diff prints hints for likely ones.
 Type respellings (`int` / `integer`) and reworded notes are not reported as changes.
 
+### Samples
+
+Live: **https://phin-tech.github.io/skills/schemaviz/**, a migration diff of an invented recipe app and the dbt project `jaffle_shop` scanned from its folder. They are rebuilt from `examples/` by `sh examples/build-site.sh <dir>`.
+
 ### Publishing
 
 `publish` only generates files; uploading is your own tool's job. Compare against the **merge base**, not the tip of
@@ -83,7 +88,7 @@ a table of column changes per table, and a Mermaid diagram that GitHub renders),
 ## Development
 
 ```bash
-python3 -m unittest discover -s tests      # standard library only; 32 tests
+python3 -m unittest discover -s tests      # standard library only; 42 tests
 ```
 
 Release: bump `__version__` in `schemaviz.py`, push, then push a tag `schemaviz-v<version>` that matches it.
@@ -107,4 +112,5 @@ python3 scripts/homebrew-formula.py 0.1.0 > ../homebrew-tap/Formula/schemaviz.rb
 | `pyproject.toml` | Makes `uv tool install` / `pipx install` give a `schemaviz` command. |
 | `install.sh` | Installs a release binary and verifies its checksum. |
 | `scripts/homebrew-formula.py` | Writes the Homebrew formula for a release. |
+| `examples/` | Inputs and build script for the sample pages. |
 | `tests/` | Unit tests. |

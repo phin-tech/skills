@@ -1,0 +1,48 @@
+Table accounts {
+  id integer [pk]
+  email varchar(255) [unique, not null]
+  full_name varchar(120)
+  joined_at timestamptz [not null]
+  household_id integer [not null, ref: > households.id]
+  locale varchar(10) [note: 'BCP 47 tag, e.g. en-GB']
+  Note: 'A person who can sign in'
+}
+Table households { id integer [pk]
+  name varchar(80) [not null] }
+Table recipes {
+  id integer [pk]
+  author_id integer [not null, ref: > accounts.id]
+  title varchar(200) [not null]
+  servings integer
+  minutes integer
+  source_url text
+}
+Table ingredients { id integer [pk]
+  name varchar(80) [unique, not null] }
+Table recipe_ingredients {
+  recipe_id integer [not null, ref: > recipes.id]
+  ingredient_id integer [not null, ref: > ingredients.id]
+  qty numeric(8,2)
+  unit varchar(20)
+  indexes { (recipe_id, ingredient_id) [pk] }
+}
+Table meal_plans {
+  id integer [pk]
+  household_id integer [not null, ref: > households.id]
+  week_start date [not null]
+}
+Table plan_slots {
+  id integer [pk]
+  plan_id integer [not null, ref: > meal_plans.id]
+  recipe_id integer [ref: > recipes.id]
+  day smallint [not null]
+}
+Table shopping_items {
+  id integer [pk]
+  plan_id integer [not null, ref: > meal_plans.id]
+  ingredient_id integer [not null, ref: > ingredients.id]
+  bought_by integer [ref: > accounts.id]
+}
+TableGroup "People" { accounts households }
+TableGroup "Cooking" { recipes ingredients recipe_ingredients }
+TableGroup "Planning" { meal_plans plan_slots shopping_items }

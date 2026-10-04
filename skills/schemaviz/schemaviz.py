@@ -22,7 +22,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-__version__ = "0.1.1"
+__version__ = "0.2.0"
 
 
 def _resource_dir() -> Path:
@@ -478,7 +478,7 @@ def _diff_inputs(a) -> tuple:
 
 
 def diff_page(old_x: str, new_x: str, names: tuple, lo: str, ln: str, renames=None, notes=False, title=None, picker=None,
-              when=(None, None)) -> tuple[str, dict, list, list]:
+              when=(None, None), fail_on: set | None = None) -> tuple[str, dict, list, list]:
     """The HTML for the changes between two DBML/JSON texts, and the counts."""
     old_t, new_t = parse_text(old_x, names[0]), parse_text(new_x, names[1])
     warnings = provenance_warnings(old_x, new_x, *when)
@@ -487,7 +487,9 @@ def diff_page(old_x: str, new_x: str, names: tuple, lo: str, ln: str, renames=No
     tables, stats = diff_tables(old_t, new_t, renames, notes)
     for h in rename_hints(old_t, new_t, renames):
         print(f"hint: possible rename: {h}. Check git, then pass --rename.", file=sys.stderr)
-    info = dict(stats, old=lo, new=ln, picker=picker, warnings=warnings)
+    broken = violations(tables, fail_on or set())
+    info = dict(stats, old=lo, new=ln, picker=picker, warnings=warnings, violations=broken)
+    diff_page.violations = broken  # read by the commands right after the call; the page itself shows them in the banner
     return to_html(tables, title or f"{lo} to {ln}", f"{lo} and {ln}", info), stats, tables, warnings
 
 
@@ -583,6 +585,45 @@ def _col_changes(o: dict, n: dict, trn: dict | None = None, notes: bool = False)
     return out
 
 
+def _change_kinds(o: dict, n: dict) -> list[str]:
+    """Machine-readable kinds of change between two versions of a column, for --fail-on."""
+    kinds = []
+    if norm_type(o["t"]) != norm_type(n["t"]):
+        kinds.append("type")
+    if o["null"] and not n["null"] and not n["pk"]:
+        kinds.append("not_null")
+    return kinds
+
+
+FAIL_ON = ("dropped-table", "dropped-column", "not-null-added", "type-changed")
+
+
+def parse_fail_on(spec: str) -> set:
+    rules = {x.strip() for x in (spec or "").split(",") if x.strip()}
+    bad = rules - set(FAIL_ON)
+    if bad:
+        raise SystemExit(f"--fail-on: unknown rule {', '.join(sorted(bad))}. Choose from {', '.join(FAIL_ON)}.")
+    return rules
+
+
+def violations(tables: list[dict], rules: set) -> list[str]:
+    """Which changes break the chosen --fail-on rules. Renamed tables and columns are not drops."""
+    out = []
+    for t in tables:
+        if t.get("diff") == "removed" and "dropped-table" in rules:
+            out.append(f"table `{t['name']}` was dropped")
+        if t.get("diff") != "changed":
+            continue
+        for c in t["cols"]:
+            if c.get("diff") == "removed" and "dropped-column" in rules:
+                out.append(f"column `{t['name']}.{c['n']}` was dropped")
+            if "type" in c.get("kinds", []) and "type-changed" in rules:
+                out.append(f"column `{t['name']}.{c['n']}` changed type ({c.get('was', '').split(';')[0]})")
+            if "not_null" in c.get("kinds", []) and "not-null-added" in rules:
+                out.append(f"column `{t['name']}.{c['n']}` became NOT NULL")
+    return out
+
+
 # Tables that record which migrations ran. They are not part of the application's schema.
 BOOKKEEPING = {"alembic_version", "django_migrations", "schema_migrations", "ar_internal_metadata", "_prisma_migrations",
                "__diesel_schema_migrations", "knex_migrations", "knex_migrations_lock", "sequelizemeta", "flyway_schema_history",
@@ -664,7 +705,7 @@ def diff_tables(old: list[dict], new: list[dict], renames: list[str] | None = No
             if src != c["n"]:
                 why.insert(0, f"renamed from {src}")
             if why:
-                c["diff"] = "changed"; c["was"] = "; ".join(why); stats["cols_changed"] += 1; changed = True
+                c["diff"] = "changed"; c["was"] = "; ".join(why); c["kinds"] = _change_kinds(oc, c); stats["cols_changed"] += 1; changed = True
         prev = None  # re-insert dropped columns after the column that used to precede them
         kept = {ren.get(c["n"], c["n"]): c["n"] for c in t["cols"]}
         for oc in o["cols"]:
@@ -989,7 +1030,69 @@ def _sql_constraint(t: dict, d: str) -> bool:
     return bool(re.match(r"\s*(check|exclude|index|key|fulltext|spatial|like)\b", d, re.I))
 
 
-def _read_sql(text: str) -> list[dict]:
+def _alter_action(tables: dict, key: tuple, act: str, report: list) -> tuple:
+    """Apply one action of an ALTER TABLE to tables[key]. Returns the table's (possibly new) key."""
+    t = tables[key]
+    a = act.strip()
+    m = re.match(r"add\s+(?:column\s+(?:if\s+not\s+exists\s+)?)?(.*)$", a, re.I | re.S)
+    if m and re.match(r"add\s+column\b", a, re.I):
+        col = _sql_column(m.group(1))
+        if col and col["n"] not in {c["n"] for c in t["cols"]}:
+            t["cols"].append(col)
+        return key
+    if re.match(r"add\s+", a, re.I):
+        body = re.sub(r"^add\s+", "", a, flags=re.I)
+        if not _sql_constraint(t, body):  # `ADD x int` without the COLUMN keyword (sqlite, mysql)
+            col = _sql_column(body)
+            if col and col["n"] not in {c["n"] for c in t["cols"]}:
+                t["cols"].append(col)
+        return key
+    m = re.match(rf"drop\s+column\s+(?:if\s+exists\s+)?({_SQL_ID})", a, re.I)
+    if m:
+        gone = _sql_ident(m.group(1))
+        t["cols"] = [c for c in t["cols"] if c["n"] != gone]
+        return key
+    m = re.match(rf"rename\s+column\s+({_SQL_ID})\s+to\s+({_SQL_ID})", a, re.I)
+    if m:
+        old, new = _sql_ident(m.group(1)), _sql_ident(m.group(2))
+        for c in t["cols"]:
+            if c["n"] == old:
+                c["n"] = new
+        return key
+    m = re.match(rf"rename\s+to\s+({_SQL_NAME})", a, re.I)
+    if m:
+        new_key = (key[0], _sql_table(m.group(1)))
+        tables[new_key] = tables.pop(key)
+        for other in tables.values():
+            for c in other["cols"]:
+                if "fk" in c and c["fk"][0][1] == key[1]:
+                    c["fk"][0] = new_key
+        return new_key
+    m = re.match(rf"alter\s+(?:column\s+)?({_SQL_ID})\s+(.*)$", a, re.I | re.S)
+    if m:
+        name, what = _sql_ident(m.group(1)), m.group(2).strip()
+        col = next((c for c in t["cols"] if c["n"] == name), None)
+        if col is not None:
+            mt = re.match(r"(?:set\s+data\s+)?type\s+(.*?)(?:\s+using\b.*)?$", what, re.I | re.S)
+            if mt:
+                col["t"] = _sql_type(mt.group(1))
+                return key
+            if re.match(r"set\s+not\s+null", what, re.I):
+                col["null"] = False
+                return key
+            if re.match(r"drop\s+not\s+null", what, re.I):
+                col["null"] = not col["pk"]
+                return key
+            if re.match(r"(set|drop)\s+default", what, re.I):
+                return key
+    report.append("ALTER TABLE " + key[1] + " " + a[:60])
+    return key
+
+
+def _read_sql(text: str, report: list | None = None) -> list[dict]:
+    """Tables from SQL DDL, with statements applied in order, so a migration that adds, renames or drops something is
+    reflected. Statements it cannot apply are appended to `report` (when given)."""
+    report = [] if report is None else report
     tables: dict[tuple, dict] = {}  # keyed by (schema, table): auth.users and public.users are different tables
     stmts = _sql_clean(text)
 
@@ -1005,36 +1108,34 @@ def _read_sql(text: str) -> list[dict]:
     create = re.compile(rf"create\s+(?:(?:global\s+|local\s+)?(?:temp(?:orary)?\s+|unlogged\s+))?table\s+(?:if\s+not\s+exists\s+)?({_SQL_NAME})\s*\((.*)\)[^()]*$", re.I | re.S)
     for st in stmts:
         m = create.match(st)
-        if not m:
-            continue
-        key = _sql_key(m.group(1))
-        t = {"name": key[1], "comment": "", "group": None, "cols": [], "uniq": [], "_schema": key[0]}
-        pending = []
-        for part in _split_top(m.group(2)):
-            if re.match(r"\s*(constraint|primary\s+key|unique|foreign\s+key|check|exclude|index|key|fulltext|spatial|like)\b", part, re.I):
-                pending.append(part)
-                continue
-            col = _sql_column(part)
-            if col:
-                t["cols"].append(col)
-        for part in pending:
-            _sql_constraint(t, part)
-        tables[key] = t
-    for st in stmts:
-        m = re.match(rf"alter\s+table\s+(?:only\s+)?(?:if\s+exists\s+)?({_SQL_NAME})\s+(.*)$", st, re.I | re.S)
-        if m and find(m.group(1)):
-            t = tables[find(m.group(1))]
-            for act in _split_top(m.group(2)):
-                a = re.sub(r"^\s*add\s+", "", act, flags=re.I)
-                if a == act:
+        if m:
+            key = _sql_key(m.group(1))
+            t = {"name": key[1], "comment": "", "group": None, "cols": [], "uniq": [], "_schema": key[0]}
+            pending = []
+            for part in _split_top(m.group(2)):
+                if re.match(r"\s*(constraint|primary\s+key|unique|foreign\s+key|check|exclude|index|key|fulltext|spatial|like)\b", part, re.I):
+                    pending.append(part)
                     continue
-                mc = re.match(r"column\s+(?:if\s+not\s+exists\s+)?(.*)$", a, re.I | re.S)
-                if mc:
-                    col = _sql_column(mc.group(1))
-                    if col and col["n"] not in {c["n"] for c in t["cols"]}:
-                        t["cols"].append(col)
-                else:
-                    _sql_constraint(t, a)
+                col = _sql_column(part)
+                if col:
+                    t["cols"].append(col)
+            for part in pending:
+                _sql_constraint(t, part)
+            tables[key] = t
+            continue
+        m = re.match(rf"alter\s+table\s+(?:only\s+)?(?:if\s+exists\s+)?({_SQL_NAME})\s+(.*)$", st, re.I | re.S)
+        if m:
+            k = find(m.group(1))
+            if k:
+                for act in _split_top(m.group(2)):
+                    k = _alter_action(tables, k, act, report)
+            continue
+        m = re.match(rf"drop\s+table\s+(?:if\s+exists\s+)?(.*?)(?:\s+(?:cascade|restrict))?$", st, re.I | re.S)
+        if m:
+            for name in _split_top(m.group(1)):
+                k = find(name)
+                if k:
+                    del tables[k]
             continue
         m = re.match(rf"create\s+unique\s+index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?(?:{_SQL_NAME}\s+)?on\s+(?:only\s+)?({_SQL_NAME})\s*(?:using\s+\w+\s*)?(\(.*\))\s*$", st, re.I | re.S)
         if m and find(m.group(1)):
@@ -1053,6 +1154,9 @@ def _read_sql(text: str) -> list[dict]:
             for c in (tables[k]["cols"] if k else []):
                 if c["n"] == _sql_ident(parts[-1]):
                     c["note"] = m.group(2).replace("''", "'")
+            continue
+        if re.match(r"(drop\s+(index|type|schema|view)|rename\s+table|create\s+table\s+\S+\s+as)\b", st, re.I):
+            report.append(" ".join(st.split())[:70])
     keep = {k: t for k, t in tables.items() if k[1].lower() not in BOOKKEEPING}
     count = defaultdict(int)
     for k in keep:
@@ -1370,7 +1474,7 @@ def _mermaid(tables: list[dict], limit: int = 18) -> str:
     return "\n".join(out)
 
 
-def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = "", limit: int = 60000, warnings=None) -> str:
+def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = "", limit: int = 60000, warnings=None, broken=None) -> str:
     """The schema changes as Markdown for a pull request comment (GitHub allows 65,536 characters). Built from whole blocks,
     so staying under `limit` never leaves a <details> or a code fence open."""
     n = lambda k, w: f"{stats[k]} {w}" if stats.get(k) else ""  # noqa: E731
@@ -1382,6 +1486,8 @@ def diff_markdown(tables: list[dict], stats: dict, lo: str, ln: str, url: str = 
     head.append(f"**Tables:** {', '.join(bits)}. **Columns:** {', '.join(cols) or 'none changed'}." +
                 (f" [Open the interactive view]({url})." if url else ""))
     blocks = ["\n".join(head)]
+    if broken:
+        blocks.append("\n".join(["> **Policy: these changes break the rules this check enforces**", ">"] + [f"> - {b}" for b in broken]))
     if warnings:
         blocks.append("\n".join(f"> **Note:** {w}" for w in warnings))
     for kind, title, sign in (("added", "New tables", "+"), ("removed", "Dropped tables", "\u2212")):
@@ -1423,17 +1529,224 @@ def publish(a) -> None:
     """Write a static folder: index.html (open it anywhere), summary.md (paste into a PR), schema.dbml and manifest.json.
     Uploading is left to whatever tool you already use (aws s3 cp, gsutil, gh, a Pages deploy)."""
     old_x, new_x, names, lo, ln = _diff_inputs(a)
-    html, stats, tables, warnings = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title, when=_when(a))
+    html, stats, tables, warnings = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title, when=_when(a), fail_on=parse_fail_on(a.fail_on))
+    broken = diff_page.violations
     out = Path(a.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    files = {"index.html": html, "summary.md": diff_markdown(tables, stats, lo, ln, a.url or "", warnings=warnings), "schema.dbml": new_x}
+    files = {"index.html": html, "summary.md": diff_markdown(tables, stats, lo, ln, a.url or "", warnings=warnings, broken=broken), "schema.dbml": new_x}
     for name, text in files.items():
         (out / name).write_text(text, encoding="utf-8")
-    manifest = {"schemaviz": __version__, "old": lo, "new": ln, "changes": stats, "has_changes": any(stats.values()),
+    manifest = {"schemaviz": __version__, "old": lo, "new": ln, "changes": stats, "has_changes": any(stats.values()), "violations": broken,
                 "entry": "index.html", "files": [{"path": n, "bytes": len(t.encode()), "type": "text/html" if n.endswith(".html")
                                                   else "text/markdown" if n.endswith(".md") else "text/plain"} for n, t in files.items()]}
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(f"{out}/: {', '.join(files)}, manifest.json  ({'no changes' if not manifest['has_changes'] else ', '.join(f'{v} {k.replace(chr(95), chr(32))}' for k, v in stats.items() if v)})")
+    if broken:
+        print("policy: " + "; ".join(broken), file=sys.stderr)
+        raise SystemExit(2)
+
+
+# ---- pointing it at a repository: `schemaviz scan DIR` ------------------------------------------------------------
+
+_SKIP_DIRS = {".git", "node_modules", "vendor", "target", "dist", "build", ".venv", "venv", "__pycache__", ".tox", ".next",
+              ".idea", ".schemaviz", "testdata", "fixtures", ".terraform", "site-packages"}
+_SOURCE_EXT = {".go", ".py", ".ts", ".tsx", ".js", ".mjs", ".cjs", ".rb", ".rs", ".java", ".kt", ".scala", ".cs", ".php", ".ex", ".exs", ".swift"}
+_TEST_NAME = re.compile(r"(_test\.go|^test_.*\.py|_test\.py|\.test\.[jt]sx?|\.spec\.[jt]sx?|_spec\.rb|Test\.java|Tests?\.cs)$")
+_DDL_START = re.compile(r"\b(create\s+(?:unique\s+)?(?:(?:global\s+|local\s+)?temp(?:orary)?\s+|unlogged\s+)?(?:table|index)|alter\s+table|drop\s+table)\b", re.I)
+
+
+def _walk(root: Path, max_depth: int = 6):
+    """Files under root (relative paths), skipping dependency and build folders, in a stable order."""
+    stack = [(root, 0)]
+    while stack:
+        d, depth = stack.pop()
+        try:
+            entries = sorted(d.iterdir())
+        except OSError:
+            continue
+        for e in entries:
+            if e.is_dir():
+                if e.name not in _SKIP_DIRS and not e.name.startswith(".") and depth < max_depth:
+                    stack.append((e, depth + 1))
+            elif e.is_file():
+                yield e
+    return
+
+
+def _natural(path: Path):
+    return [int(x) if x.isdigit() else x.lower() for x in re.split(r"(\d+)", str(path))]
+
+
+def extract_embedded_sql(src: str) -> list[str]:
+    """DDL statements written inside source code (a Go raw string, a Python triple-quoted string, a JS template literal...).
+    Only CREATE TABLE / CREATE INDEX / ALTER TABLE / DROP TABLE are looked for; a statement built by string concatenation
+    is not understood."""
+    out, pos, n = [], 0, len(src)
+    for m in _DDL_START.finditer(src):
+        if m.start() < pos:
+            continue
+        i = m.start()
+        creates_table = re.match(r"create\s+(?:unique\s+)?(?:\w+\s+)*table\b", m.group(1), re.I) is not None
+        multiline = src[:i].rstrip().endswith(("`", '"""', "\'\'\'"))
+        depth, j, opened = 0, i, False
+        while j < n:
+            c = src[j]
+            if c == "(":
+                depth += 1; opened = True
+            elif c == ")":
+                depth -= 1
+                if depth < 0:
+                    break
+                if creates_table and opened and depth == 0:
+                    j += 1
+                    break
+            elif depth == 0 and c in ";`":
+                break
+            elif depth == 0 and c == "\n" and not multiline and not creates_table:
+                break
+            j += 1
+        stmt = src[i:j]
+        pos = j
+        stmt = stmt.replace("\\n", " ").replace("\\t", " ").replace('\\"', '"')
+        if stmt.count('"') % 2:  # a closing quote of the string literal that held the statement
+            stmt = stmt.rsplit('"', 1)[0]
+        out.append(stmt.strip().rstrip(",+ "))
+    return [x for x in out if x]
+
+
+def _up_part(path: Path, text: str) -> str | None:
+    """The 'up' half of a migration file, or None for a down/undo file."""
+    name = path.name.lower()
+    if name.endswith((".down.sql", "_down.sql")) or re.match(r"u\d+__", name):
+        return None
+    m = re.search(r"--\s*\+goose\s+down", text, re.I)
+    if m:
+        text = text[: m.start()]
+    m = re.search(r"--\s*migrate:down", text, re.I)  # dbmate
+    return text[: m.start()] if m else text
+
+
+def scan_repo(root: Path) -> dict:
+    """Find the schema in a repository and turn it into DBML. Looks, in order of how exact the source is, for a DBML file,
+    a dbt manifest, a SQL dump, SQL migrations, and SQL embedded in source code. Returns
+    {"dbml", "how", "notes", "files"}; raises SystemExit with advice when nothing usable is found."""
+    root = root.resolve()
+    files = list(_walk(root))
+    rel = lambda p: str(p.relative_to(root))  # noqa: E731
+    notes: list[str] = []
+    hints: list[str] = []
+
+    def done(dbml: str, how: str, used: list) -> dict:
+        return {"dbml": dbml, "how": how, "notes": notes, "files": [str(f) for f in used]}
+
+    # 1. DBML that already exists
+    dbmls = sorted((f for f in files if f.suffix == ".dbml"), key=lambda f: (f.name != "schema.dbml", len(f.parts), str(f)))
+    if dbmls:
+        pick = dbmls[0]
+        text = pick.read_text(encoding="utf-8")
+        if parse_dbml(text):
+            if len(dbmls) > 1:
+                notes.append("also found: " + ", ".join(rel(f) for f in dbmls[1:4]))
+            return done(text, f"the DBML file {rel(pick)}", [pick])
+
+    # 2. a dbt project with a manifest
+    for proj in (f for f in files if f.name == "dbt_project.yml"):
+        man = proj.parent / "target" / "manifest.json"
+        if man.exists():
+            try:
+                dbml = export_dbt(str(man), None, False)  # the same output as `schemaviz dbt`, header included
+            except (SystemExit, ValueError, KeyError):
+                dbml = ""
+            if dbml:
+                cat = man.with_name("catalog.json")
+                if not cat.exists():
+                    notes.append("no catalog.json beside the manifest, so only declared columns and no types")
+                return done(dbml, f"the dbt manifest {rel(man)}", [man])
+        else:
+            hints.append(f"{rel(proj.parent) or '.'} is a dbt project but has no target/manifest.json: run `dbt parse` there (no warehouse needed), then scan again")
+
+    # 3. a full schema dump
+    sqls = [f for f in files if f.suffix == ".sql"]
+    dumps = [f for f in sqls if re.search(r"(^|[_.-])(structure|schema|dump)([_.-]|\.sql$)", f.name, re.I)]
+    for f in sorted(dumps, key=lambda f: (len(f.parts), str(f))):
+        report: list = []
+        tables = _read_sql(f.read_text(encoding="utf-8", errors="replace"), report)
+        if tables:
+            if report:
+                notes.append(f"{len(report)} statement(s) not applied, e.g. {report[0]}")
+            return done(to_dbml(tables, f"scan {root.name}", "sql dump"), f"the SQL schema file {rel(f)}", [f])
+
+    # 4. SQL migrations, replayed in order
+    mig_dirs = {f.parent for f in sqls if re.search(r"migrat|flyway|goose|dbmate|ddl|schema", "/".join(f.relative_to(root).parts[:-1]), re.I)}
+    migs = sorted((f for f in sqls if f.parent in mig_dirs), key=_natural) or sorted(sqls, key=_natural)
+    parts, used = [], []
+    for f in migs:
+        up = _up_part(f, f.read_text(encoding="utf-8", errors="replace"))
+        if up and _DDL_START.search(up):
+            parts.append(up); used.append(f)
+    if parts:
+        report = []
+        tables = _read_sql(";\n".join(parts), report)
+        if tables:
+            notes.append(f"replayed {len(used)} migration file(s) in name order")
+            if report:
+                notes.append(f"{len(report)} statement(s) could not be applied, so the result may be off, e.g. {report[0]}")
+            return done(to_dbml(tables, f"scan {root.name}", "sql migrations"), f"{len(used)} SQL migration file(s)", used)
+
+    # 5. SQL embedded in source code (Go raw strings, Python/JS strings...)
+    stmts, srcs = [], []
+    for f in sorted((f for f in files if f.suffix in _SOURCE_EXT and not _TEST_NAME.search(f.name)), key=_natural):
+        try:
+            if f.stat().st_size > 1_500_000:
+                continue
+            found = extract_embedded_sql(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        if any(re.match(r"create\s+(?:\w+\s+)*table", x, re.I) for x in found):
+            stmts += found; srcs.append(f)
+    if srcs:
+        report = []
+        tables = _read_sql(";\n".join(stmts), report)
+        if tables:
+            notes.append(f"read {len(stmts)} DDL statement(s) from {len(srcs)} source file(s), applied in file order")
+            notes.append("the order across files is by path, so a migration split over files may be applied out of order")
+            if report:
+                notes.append(f"{len(report)} statement(s) could not be applied, e.g. {report[0]}")
+            return done(to_dbml(tables, f"scan {root.name}", "sql embedded in source"), "SQL embedded in " + ", ".join(rel(f) for f in srcs[:3]) + (" ..." if len(srcs) > 3 else ""), srcs)
+
+    # 6. things that need the project's own tooling: say exactly what to run
+    def has(name):
+        return next((f for f in files if f.name == name), None)
+
+    if (f := has("schema.prisma")):
+        hints.append(f"Prisma ({rel(f)}): `npx prisma migrate diff --from-empty --to-schema-datamodel {rel(f)} --script > schema.sql`, then `schemaviz scan schema.sql`")
+    if (f := has("manage.py")):
+        hints.append(f"Django ({rel(f.parent) or '.'}): run in the project's environment: `schemaviz django <settings.module> --out schema.dbml`")
+    if has("alembic.ini") or any(f.suffix == ".py" and "declarative_base" in f.read_text(encoding="utf-8", errors="replace")[:20000] for f in files[:400] if f.suffix == ".py"):
+        hints.append("SQLAlchemy: `schemaviz sqlalchemy your.models:Base --out schema.dbml` (needs sqlalchemy, in the project's environment)")
+    if (f := has("schema.rb")) or (f := has("structure.sql")):
+        hints.append(f"Rails ({rel(f)}): convert with `schemaviz sql` once it is SQL; for schema.rb ask the agent to write the DBML")
+    if any(f.suffix == ".go" and re.search(r'gorm:"|bun:"|db:"', f.read_text(encoding="utf-8", errors="replace")[:200000]) for f in files if f.suffix == ".go"):
+        hints.append("Go struct tags (gorm/bun/sqlx): there is no SQL to read; ask the agent (the schemaviz skill) to write the DBML from the structs")
+    lines = [f"No schema found in {root}.", "Looked for: a .dbml file, a dbt manifest, a SQL dump or migrations, and CREATE TABLE statements inside source files."]
+    lines += ["Found instead:"] + [f"  - {h}" for h in hints] if hints else ["Nothing recognisable. If the schema lives in model code, ask the agent (the schemaviz skill) to write DBML, or point at a .sql dump."]
+    raise SystemExit("\n".join(lines))
+
+
+def scan_target(path: Path) -> tuple[str, list]:
+    """(DBML text, files read) for a file or a repository directory. Notes go to stderr."""
+    if path.is_dir():
+        res = scan_repo(path)
+        print(f"schemaviz: read {res['how']}", file=sys.stderr)
+        for note in res["notes"]:
+            print(f"schemaviz: note: {note}", file=sys.stderr)
+        return res["dbml"], res["files"]
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".sql":  # a lone .sql file is a schema too
+        tables = _read_sql(text)
+        if tables:
+            return to_dbml(tables, f"scan {path.name}", "sql"), [str(path)]
+    return text, [str(path)]
 
 
 # ---- local server: `schemaviz open` ------------------------------------------------------------------------------
@@ -1445,13 +1758,30 @@ class _View:
     def __init__(self, file, diff=False, rev_from=None, rev_to=None, renames=None, notes=False, title=None):
         self.file, self.diff, self.rev_from, self.rev_to = str(file), diff, rev_from, rev_to
         self.renames, self.notes, self.title = renames, notes, title
+        p = Path(file)
+        self.scan = p.is_dir() or p.suffix == ".sql"
+        self._cache = None
+
+    def _scanned(self) -> str:
+        """DBML for a repository (or .sql file), re-read when a source file changed or every 10 seconds."""
+        import time
+
+        files = self._cache[2] if self._cache else []
+        stamp = tuple(Path(f).stat().st_mtime_ns if Path(f).exists() else 0 for f in files)
+        if not self._cache or self._cache[3] != stamp or time.monotonic() - self._cache[1] > 10:
+            text, used = scan_target(Path(self.file))
+            self._cache = (text, time.monotonic(), used, tuple(Path(f).stat().st_mtime_ns if Path(f).exists() else 0 for f in used))
+        return self._cache[0]
 
     def inputs(self, query: dict) -> tuple[dict, str]:
         """Read what the page is drawn from, and a version that changes whenever it does. Cheap and silent: the open page
         asks for the version every second or so, and only a changed version makes it fetch the page again."""
         import hashlib
 
-        text = Path(self.file).read_text(encoding="utf-8")
+        if self.scan:
+            text = self._scanned()
+        else:
+            text = Path(self.file).read_text(encoding="utf-8")
         if not self.diff:
             return {"text": text}, hashlib.sha1(text.encode()).hexdigest()
         a = (query.get("from") or [self.rev_from or "HEAD"])[0]
@@ -1463,7 +1793,7 @@ class _View:
     def render(self, inp: dict) -> str:
         if not self.diff:
             tables = parse_text(inp["text"], self.file)
-            return to_html(tables, self.title or Path(self.file).stem.replace("_", " ").replace("-", " ").title(), Path(self.file).name)
+            return to_html(tables, self.title or (Path(self.file).resolve().name if self.scan else Path(self.file).stem).replace("_", " ").replace("-", " ").title(), Path(self.file).name or ".")
         a, b = inp["a"], inp["b"]
         revs = list_revs(self.file)
         for r in (a, b):
@@ -1569,9 +1899,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(prog="schemaviz", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--version", action="version", version=f"schemaviz {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
+    sc = sub.add_parser("scan", help="find the schema in a repository folder (DBML, dbt manifest, SQL dump or migrations, SQL inside source code) and write DBML")
+    sc.add_argument("path", nargs="?", default=".")
+    sc.add_argument("--out", default="-", help="default: standard output")
     sub.add_parser("doctor", help="check what this install can do (git, optional packages, template)")
     o = sub.add_parser("open", help="serve a DBML file in your browser; reloads when it changes. With --from/--to, shows what changed between commits, with a picker")
-    o.add_argument("file", help="DBML/JSON file; for revisions it must be tracked in git")
+    o.add_argument("file", help="a DBML/JSON file, a .sql schema, or a repository folder (the schema is found for you); for revisions it must be a DBML file tracked in git")
     o.add_argument("--from", dest="rev_from", metavar="REV", help="old revision: turns on the changes view (default to: the working tree)")
     o.add_argument("--to", dest="rev_to", metavar="REV", help="new revision (default: the working tree)")
     o.add_argument("--rename", action="append", metavar="OLD=NEW", help="a confirmed rename (repeatable), as for diff")
@@ -1580,7 +1913,7 @@ def main() -> None:
     o.add_argument("--port", type=int, default=0, help="default: any free port")
     o.add_argument("--no-open", action="store_true", help="print the address but do not open a browser")
     r = sub.add_parser("render", help="DBML (or JSON) file -> HTML page")
-    r.add_argument("input")
+    r.add_argument("input", help="a DBML/JSON file, a .sql schema, or a repository folder")
     r.add_argument("--out", default="schema.html")
     r.add_argument("--title")
     r.add_argument("--expect", type=int, metavar="N", help="fail if the file does not hold exactly N tables (the count from the code)")
@@ -1594,6 +1927,8 @@ def main() -> None:
         p.add_argument("--notes", action="store_true", help="also report edited notes as changes (off by default: notes get reworded)")
         p.add_argument("--rename", action="append", metavar="OLD=NEW",
                        help="a rename confirmed in the code or git history: old=new for a table, table.old=new for a column (repeatable)")
+        p.add_argument("--fail-on", default="", metavar="RULES",
+                       help="exit 2 (after writing the outputs) when the changes break a rule: " + ", ".join(FAIL_ON) + " (comma-separated)")
         p.add_argument("--old-label", help="name for the old side, e.g. a commit hash or tag")
         p.add_argument("--new-label", help="name for the new side")
 
@@ -1627,9 +1962,19 @@ def main() -> None:
 
     if a.cmd == "doctor":
         raise SystemExit(doctor())
+    if a.cmd == "scan":
+        text, _ = scan_target(Path(a.path))
+        if a.out == "-":
+            sys.stdout.write(text)
+        else:
+            Path(a.out).write_text(text, encoding="utf-8")
+            print(f"{a.out}: DBML ({len(re.findall(r'(?m)^Table ', text))} tables)")
+        return
     if a.cmd == "open":
         if not Path(a.file).exists():
             raise SystemExit(f"{a.file} not found.")
+        if Path(a.file).is_dir() and (a.rev_from or a.rev_to):
+            raise SystemExit("The changes view needs a DBML file tracked in git: run `schemaviz scan DIR --out docs/schema.dbml`, commit it, then open that file.")
         serve(_View(a.file, bool(a.rev_from or a.rev_to), a.rev_from, a.rev_to, a.rename, a.notes, a.title), a.port, not a.no_open)
         return
     if a.cmd == "publish":
@@ -1637,15 +1982,20 @@ def main() -> None:
         return
     if a.cmd == "diff":
         old_x, new_x, names, lo, ln = _diff_inputs(a)
-        html, stats, tables, warnings = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title, when=_when(a))
+        html, stats, tables, warnings = diff_page(old_x, new_x, names, lo, ln, a.rename, a.notes, a.title, when=_when(a), fail_on=parse_fail_on(a.fail_on))
+        broken = diff_page.violations
         Path(a.out).write_text(html, encoding="utf-8")
         if a.md:
-            Path(a.md).write_text(diff_markdown(tables, stats, lo, ln, warnings=warnings), encoding="utf-8")
+            Path(a.md).write_text(diff_markdown(tables, stats, lo, ln, warnings=warnings, broken=broken), encoding="utf-8")
         print(f"{a.out}: " + ", ".join(f"{v} {k.replace('_', ' ')}" for k, v in stats.items() if v) if any(stats.values())
               else f"{a.out}: no differences between {lo} and {ln}")
     elif a.cmd == "render":
         path = Path(a.input)
-        tables = load_tables(path)
+        if path.is_dir() or path.suffix == ".sql":
+            text, _ = scan_target(path)
+            tables = parse_text(text, "scan.dbml")
+        else:
+            tables = load_tables(path)
         if a.expect is not None and len(tables) != a.expect:
             raise SystemExit(f"Expected {a.expect} tables but {path.name} has {len(tables)}.")
         _warn_missing_fks(tables)

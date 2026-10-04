@@ -28,6 +28,7 @@ schemaviz doctor                                              # what works on th
 | What a migration changed | `schemaviz open schema.dbml --from v1.4 --to HEAD` (revision picker in the page) |
 | The same as a file | `schemaviz diff --file schema.dbml --from v1.4 --to HEAD --out changes.html` |
 | Something to attach to a pull request | `schemaviz publish --file schema.dbml --from "$(git merge-base origin/main HEAD)" --to HEAD --out-dir site` (section 5) |
+| The schema of a repository, found for you | `schemaviz scan ./repo --out schema.dbml`, or `schemaviz open ./repo` (section 1) |
 | DBML from code or a database | `schemaviz sqlalchemy`, `django`, `sql`, `dbt`, `db` (section 1) |
 
 `open` keeps running until stopped. Start it in the background, give the user the address it prints, and stop it when
@@ -35,7 +36,16 @@ they are done. Add `--no-open` when the user is not at this machine.
 
 ## 1. Write the DBML
 
-Use whatever is cheapest and most accurate:
+Try `schemaviz scan <repo> --out schema.dbml` first. It looks, from most to least exact, for a `.dbml` file, a dbt
+manifest, a SQL dump (`schema.sql`, `structure.sql`), SQL migrations (replayed in name order: create, add, drop, rename
+and alter-column are applied), and `CREATE TABLE` statements written inside source code (Go raw strings, Python or JS
+strings). It prints what it read and anything it could not apply. Read those notes: a migration it could not apply, or
+migrations spread over several source files (applied in path order), can make the result wrong. When it finds nothing it
+says what to run instead (Prisma, Django, SQLAlchemy, struct tags). Check the table count against the code as usual.
+Do not scan a repo that holds only ORM models (Django, SQLAlchemy, TypeORM, Go struct tags): use the exporters below, or
+read the models and write the DBML yourself.
+
+Otherwise use whatever is cheapest and most accurate:
 
 - **A generator that already exists**, if the project has one: `prisma-dbml-generator` (Prisma), `drizzle-dbml-generator`
   (Drizzle), `npx @dbml/cli db2dbml postgres <url>` (a live database), `sql2dbml` (a `.sql` dump). Check its output
